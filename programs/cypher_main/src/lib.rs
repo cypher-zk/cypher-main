@@ -935,6 +935,16 @@ pub mod cypher_main {
         let pool_group = ctx.accounts.pool.group;
         let now = Clock::get()?.unix_timestamp;
 
+        send_settlement_fees(
+            &ctx.accounts.pool,
+            &ctx.accounts.market,
+            &ctx.accounts.pool_vault,
+            &ctx.accounts.vault_authority,
+            &ctx.accounts.creator_token_account,
+            &ctx.accounts.treasury,
+            &ctx.accounts.token_program,
+        )?;
+
         let registry = &mut ctx.accounts.settlement_registry;
         registry.settled_shards = registry
             .settled_shards
@@ -995,6 +1005,16 @@ pub mod cypher_main {
         let pool_market = ctx.accounts.pool.market;
         let pool_group = ctx.accounts.pool.group;
         let now = Clock::get()?.unix_timestamp;
+
+        send_settlement_fees(
+            &ctx.accounts.pool,
+            &ctx.accounts.market,
+            &ctx.accounts.pool_vault,
+            &ctx.accounts.vault_authority,
+            &ctx.accounts.creator_token_account,
+            &ctx.accounts.treasury,
+            &ctx.accounts.token_program,
+        )?;
 
         let registry = &mut ctx.accounts.settlement_registry;
         registry.settled_shards = registry
