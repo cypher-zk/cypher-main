@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-cypher_main = "F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc"
+cypher_main = "7JpiCk5c1jZdBC9moiUBQbAjdvCGqUhuMRn4r4FpSjV4"
 
 [provider]
 cluster = "localnet"
@@ -17,5 +17,12 @@ test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
 
 [hooks]
 
+[test]
+startup_wait = 5000
+shutdown_wait = 2000
+upgradeable = false
+
 [test.validator]
-startup_wait = 10000
+bind_address = "127.0.0.1"
+ledger = ".anchor/test-ledger"
+rpc_port = 8899
