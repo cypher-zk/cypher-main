@@ -1821,7 +1821,7 @@ impl CallbackCompAccs for SettleYesnoCallback<'_> {
             is_writable: false,
         });
         accounts.push(CallbackAccount {
-            pubkey: derive_comp_def_pda!(comp_def_offset("settle_yesno")),
+            pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_YESNO),
             is_writable: false,
         });
         accounts.push(CallbackAccount {
@@ -1885,7 +1885,7 @@ impl CallbackCompAccs for SettleMultioutcomeCallback<'_> {
             is_writable: false,
         });
         accounts.push(CallbackAccount {
-            pubkey: derive_comp_def_pda!(comp_def_offset("settle_multioutcome")),
+            pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_MULTIOUTCOME),
             is_writable: false,
         });
         accounts.push(CallbackAccount {
@@ -1949,7 +1949,7 @@ impl CallbackCompAccs for SettleAccuracyCallback<'_> {
             is_writable: false,
         });
         accounts.push(CallbackAccount {
-            pubkey: derive_comp_def_pda!(comp_def_offset("settle_accuracy")),
+            pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_ACCURACY),
             is_writable: false,
         });
         accounts.push(CallbackAccount {
