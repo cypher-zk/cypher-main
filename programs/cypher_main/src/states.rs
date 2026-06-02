@@ -609,17 +609,10 @@ pub struct ResolutionPosted {
 
 /// Emitted by settle_*_callback for each completed Arcium shard.
 ///
-/// For YesNo + MultiOutcome:
-///   winner_mask is [u8; 8] — 1=winner, 0=loser, 0=unused slot.
-///   Serialized as 8 bytes.
-///
-/// For Accuracy:
-///   winner_mask is actually the error bytes — [u64; 4] serialized as
-///   32 bytes little-endian (8 bytes per u64).
-///   Backend decodes using: for i in 0..4 { u64::from_le_bytes(bytes[i*8..i*8+8]) }
-///   Reusing winner_mask field avoids needing a separate event type.
-///
-/// Backend uses shard_index + shard order from DB to map mask[i] → Position PDA.
+/// The circuit output is Enc<Shared, OutputStruct>, so the callback receives
+/// SharedEncryptedStruct (encryption_key + nonce + ciphertext). The
+/// backend/TS client decrypts ciphertext via x25519 to recover the
+/// plaintext winner_mask / errors, then proceeds with settlement.
 #[event]
 pub struct ShardSettled {
     pub registry: Pubkey,
@@ -629,7 +622,9 @@ pub struct ShardSettled {
     pub shard_index: u32,
     pub settled_shards: u32,
     pub total_shards: u32,
-    pub winner_mask: Vec<u8>, // [u8; 8] for YesNo/Multi  |  [u64; 4] as bytes for Accuracy
+    pub encryption_key: [u8; 32],
+    pub nonce: u128,
+    pub ciphertext: [u8; 32],
     pub settled_at: i64,
 }
 
