@@ -230,6 +230,45 @@ pub mod cypher_main {
         pool._padding = [0u8; 64];
         Ok(())
     }
+
+    pub fn cancel_market(ctx: Context<CancelMarket>) -> Result<()> {
+        require!(
+            ctx.accounts.market_group.is_open(),
+            CypherError::MarketNotOpen
+        );
+        require!(
+            ctx.accounts.pool.participant_count == 0,
+            CypherError::MarketHasParticipants
+        );
+        require!(
+            ctx.accounts.bond.status == BondStatus::Locked,
+            CypherError::BondNotLocked
+        );
+
+        let bond_key = ctx.accounts.bond.key();
+        let authority_seeds = &[
+            b"bond_vault_authority",
+            bond_key.as_ref(),
+            &[ctx.accounts.bond.vault_authority_bump],
+        ];
+
+        anchor_spl::token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.key(),
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.bond_vault.to_account_info(),
+                    to: ctx.accounts.creator_token_account.to_account_info(),
+                    authority: ctx.accounts.bond_vault_authority.to_account_info(),
+                },
+                &[authority_seeds],
+            ),
+            BOND_AMOUNT,
+        )?;
+
+        ctx.accounts.bond.status = BondStatus::Returned;
+        ctx.accounts.market_group.status = GroupStatus::Voided;
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -415,4 +454,36 @@ pub struct CreatePool<'info> {
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct CancelMarket<'info> {
+    #[account(
+        mut,
+        constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority,
+    )]
+    pub market_group: Account<'info, MarketGroup>,
+
+    #[account(mut, constraint = bond.group == market_group.key())]
+    pub bond: Account<'info, Bond>,
+
+    #[account(mut, seeds = [b"bond_vault", bond.key().as_ref()], bump)]
+    pub bond_vault: InterfaceAccount<'info, TokenAccount>,
+
+    /// CHECK: PDA — bond vault authority
+    #[account(seeds = [b"bond_vault_authority", bond.key().as_ref()], bump)]
+    pub bond_vault_authority: UncheckedAccount<'info>,
+
+    #[account(mut, constraint = pool.participant_count == 0 @ CypherError::MarketHasParticipants)]
+    pub pool: Account<'info, Pool>,
+
+    #[account(
+        mut,
+        constraint = creator_token_account.owner == creator.key() @ CypherError::UnauthorizedAuthority,
+    )]
+    pub creator_token_account: InterfaceAccount<'info, TokenAccount>,
+
+    pub creator: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
 }
