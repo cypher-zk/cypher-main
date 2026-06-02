@@ -20,3 +20,5 @@ import "./suites/comp_defs.test";
 import "./suites/init_settlement_registry.test";
 import "./suites/queue_settlement.test";
 import "./suites/settle_callback.test";
+import "./suites/accuracy_send_fees.test";
+import "./suites/write_position_payout.test";
