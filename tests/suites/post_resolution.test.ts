@@ -94,6 +94,14 @@ describe("post_resolution", () => {
   let groupEPda: PublicKey;
   let poolEPda: PublicKey;
 
+  // ── Group F: MultiOutcome, Locked — Outcome(0) boundary check
+  let groupFPda: PublicKey;
+  let poolFPda: PublicKey;
+
+  // ── Group G: MultiOutcome, Locked — Outcome(3) boundary check
+  let groupGPda: PublicKey;
+  let poolGPda: PublicKey;
+
   // ── A separate oracle keypair (not the creator) to test UnauthorizedOracle
   let wrongOracle: Keypair;
 
@@ -298,14 +306,32 @@ describe("post_resolution", () => {
     );
     poolEPda = await createFlatPool(groupEPda);
 
+    groupFPda = await createGroup(
+      "Group F — MultiOutcome for Outcome(0) boundary check",
+      MULTI,
+      2,
+      ["A", "B", "C", "D"],
+    );
+    poolFPda = await createFlatPool(groupFPda);
+
+    groupGPda = await createGroup(
+      "Group G — MultiOutcome for Outcome(3) boundary check",
+      MULTI,
+      2,
+      ["A", "B", "C", "D"],
+    );
+    poolGPda = await createFlatPool(groupGPda);
+
     // ── Wait for lock_timestamps to pass ─────────────────────────────────────
     await new Promise((r) => setTimeout(r, 3000));
 
-    // ── Lock B, C, D, E ───────────────────────────────────────────────────────
+    // ── Lock B, C, D, E, F, G ────────────────────────────────────────────────
     await lockGroup(groupBPda, poolBPda);
     await lockGroup(groupCPda, poolCPda);
     await lockGroup(groupDPda, poolDPda);
     await lockGroup(groupEPda, poolEPda);
+    await lockGroup(groupFPda, poolFPda);
+    await lockGroup(groupGPda, poolGPda);
 
     // ── Pre-resolve group E so we can test AlreadyResolved ───────────────────
     await g.program.methods
@@ -604,13 +630,43 @@ describe("post_resolution", () => {
 
   // ── Pending: edge cases that require additional infrastructure ────────────────
 
-  it.skip("accepts Outcome(0) — minimum valid index for MultiOutcome (boundary check)", () => {
-    // Verify that Outcome(0) is not rejected by OutcomeIndexOutOfRange.
-    // This is a boundary test for the idx < 4 check.
+  it("accepts Outcome(0) — minimum valid index for MultiOutcome (boundary check)", async () => {
+    const beforeTs = Math.floor(Date.now() / 1000);
+    const sig = await g.program.methods
+      .postResolution({ outcome: { "0": 0 } })
+      .accountsPartial({
+        marketGroup: groupFPda,
+        oracleSigner: g.payer.publicKey,
+      })
+      .rpc({ commitment: "confirmed" });
+    console.log("PostResolution Outcome(0) tx:", sig);
+
+    const mg = await g.program.account.marketGroup.fetch(groupFPda);
+    expect(mg.status).to.have.property("resolving");
+    expect(mg.resolvedValue).to.have.property("outcome");
+    expect((mg.resolvedValue as any).outcome[0]).to.equal(0);
+    expect(mg.resolvedAt).to.not.be.null;
+    // Allow 2 s of skew: the validator clock can lag Date.now() by up to 1 s.
+    expect(mg.resolvedAt!.toNumber()).to.be.gte(beforeTs - 2);
   });
 
-  it.skip("accepts Outcome(3) — maximum valid index for MultiOutcome (boundary check)", () => {
-    // Verify that Outcome(3) is not rejected by OutcomeIndexOutOfRange.
-    // Requires a fresh Locked MultiOutcome group.
+  it("accepts Outcome(3) — maximum valid index for MultiOutcome (boundary check)", async () => {
+    const beforeTs = Math.floor(Date.now() / 1000);
+    const sig = await g.program.methods
+      .postResolution({ outcome: { "0": 3 } })
+      .accountsPartial({
+        marketGroup: groupGPda,
+        oracleSigner: g.payer.publicKey,
+      })
+      .rpc({ commitment: "confirmed" });
+    console.log("PostResolution Outcome(3) tx:", sig);
+
+    const mg = await g.program.account.marketGroup.fetch(groupGPda);
+    expect(mg.status).to.have.property("resolving");
+    expect(mg.resolvedValue).to.have.property("outcome");
+    expect((mg.resolvedValue as any).outcome[0]).to.equal(3);
+    expect(mg.resolvedAt).to.not.be.null;
+    // Allow 2 s of skew: the validator clock can lag Date.now() by up to 1 s.
+    expect(mg.resolvedAt!.toNumber()).to.be.gte(beforeTs - 2);
   });
 });
