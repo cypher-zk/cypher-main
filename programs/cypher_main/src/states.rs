@@ -181,6 +181,7 @@ pub enum RegistryStatus {
 pub const CYPHER_MARKET_SPACE: usize = 8   // discriminator
     + 32   // authority: Pubkey
     + 32   // treasury: Pubkey
+    + 32   // accepted_mint: Pubkey  (USDC mint — enforced on every vault + transfer)
     + 2    // protocol_fee_bps: u16
     + 2    // lp_fee_bps: u16
     + 2    // accuracy_platform_fee_bps: u16
@@ -284,6 +285,13 @@ pub struct CyperMarket {
 
     /// Treasury USDC token account. Receives protocol fees.
     pub treasury: Pubkey,
+
+    /// The ONLY mint accepted across the entire protocol.
+    /// Set once at initialize() — never changes.
+    /// Devnet:  4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
+    /// Mainnet: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+    /// Enforced via constraint on every vault creation and every transfer.
+    pub accepted_mint: Pubkey,
 
     /// Protocol fee in basis points (e.g. 50 = 0.5%).
     /// Applied to total pool on YesNo/MultiOutcome markets.
@@ -765,6 +773,8 @@ pub enum CypherError {
     UnauthorizedAuthority,
     #[msg("Fee basis points exceed maximum (10000)")]
     FeeTooHigh,
+    #[msg("Token mint does not match the accepted USDC mint")]
+    InvalidMint,
 
     // math / overflow
     #[msg("Arithmetic overflow in payout calculation")]
