@@ -12,6 +12,7 @@ import "./suites/cancel_market.test";
 import "./suites/place_bet.test";
 import "./suites/place_bet_accuracy.test";
 import "./suites/lock_market.test";
+import "./suites/post_resolution.test";
 import "./suites/claim_payout.test";
 import "./suites/return_bond.test";
 import "./suites/slash_bond.test";
