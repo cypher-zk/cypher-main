@@ -17,6 +17,11 @@ pub const MAX_PAYLOAD_SIZE: usize = 128;
 pub const MIN_STAKE: u64 = 1_000_000;
 pub const DISPUTE_WINDOW: i64 = 3_600;
 
+// Arcium computation definition offsets — one per circuit
+const COMP_DEF_OFFSET_YESNO: u32 = comp_def_offset("settle_yesno");
+const COMP_DEF_OFFSET_MULTIOUTCOME: u32 = comp_def_offset("settle_multioutcome");
+const COMP_DEF_OFFSET_ACCURACY: u32 = comp_def_offset("settle_accuracy");
+
 #[arcium_program]
 pub mod cypher_main {
 
@@ -697,6 +702,23 @@ pub mod cypher_main {
         });
         Ok(())
     }
+
+    // ────── ARCIUM COMPUTATION DEFINITION INIT ──────────────────────────
+
+    pub fn init_yesno_comp_def(ctx: Context<InitYesNoCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, None)?;
+        Ok(())
+    }
+
+    pub fn init_multioutcome_comp_def(ctx: Context<InitMultiOutcomeCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, None)?;
+        Ok(())
+    }
+
+    pub fn init_accuracy_comp_def(ctx: Context<InitAccuracyCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, None)?;
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -1106,4 +1128,81 @@ pub struct PostResolution<'info> {
     pub market_group: Account<'info, MarketGroup>,
 
     pub oracle_signer: Signer<'info>,
+}
+
+// ARCIUM ACCOUNT CONTEXTS
+
+#[init_computation_definition_accounts("settle_yesno", payer)]
+#[derive(Accounts)]
+pub struct InitYesNoCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program.
+    pub comp_def_account: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[init_computation_definition_accounts("settle_multioutcome", payer)]
+#[derive(Accounts)]
+pub struct InitMultiOutcomeCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program.
+    pub comp_def_account: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[init_computation_definition_accounts("settle_accuracy", payer)]
+#[derive(Accounts)]
+pub struct InitAccuracyCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program.
+    pub comp_def_account: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
 }
