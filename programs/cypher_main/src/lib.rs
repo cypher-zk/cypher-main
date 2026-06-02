@@ -16,6 +16,13 @@ pub const USDC_DECIMALS: u8 = 6;
 pub const MAX_PAYLOAD_SIZE: usize = 128;
 pub const MIN_STAKE: u64 = 1_000_000;
 pub const DISPUTE_WINDOW: i64 = 3_600;
+pub const YESNO_SHARD_SIZE: u32 = 8;
+pub const ACCURACY_SHARD_SIZE: u32 = 4;
+
+// Arcium computation definition offsets — one per circuit
+const COMP_DEF_OFFSET_YESNO: u32 = comp_def_offset("settle_yesno");
+const COMP_DEF_OFFSET_MULTIOUTCOME: u32 = comp_def_offset("settle_multioutcome");
+const COMP_DEF_OFFSET_ACCURACY: u32 = comp_def_offset("settle_accuracy");
 
 #[arcium_program]
 pub mod cypher_main {
@@ -697,6 +704,65 @@ pub mod cypher_main {
         });
         Ok(())
     }
+
+    // ────── ARCIUM COMPUTATION DEFINITION INIT ──────────────────────────
+
+    pub fn init_yesno_comp_def(ctx: Context<InitYesNoCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, None)?;
+        Ok(())
+    }
+
+    pub fn init_multioutcome_comp_def(ctx: Context<InitMultiOutcomeCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, None)?;
+        Ok(())
+    }
+
+    pub fn init_accuracy_comp_def(ctx: Context<InitAccuracyCompDef>) -> Result<()> {
+        init_computation_def(ctx.accounts, None)?;
+        Ok(())
+    }
+
+    pub fn init_settlement_registry(
+        ctx: Context<InitSettlementRegistry>,
+        total_shards: u32,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.market_group.is_resolving(),
+            CypherError::MarketNotResolving
+        );
+        require!(
+            ctx.accounts
+                .market_group
+                .dispute_window_ended(Clock::get()?.unix_timestamp),
+            CypherError::DisputeWindowActive
+        );
+        require!(total_shards > 0, CypherError::ZeroWinners);
+
+        let shard_size = match ctx.accounts.market_group.market_type {
+            MarketType::Accuracy => ACCURACY_SHARD_SIZE,
+            _ => YESNO_SHARD_SIZE,
+        };
+        let expected = ctx.accounts.pool.total_shards(shard_size);
+        require!(total_shards == expected, CypherError::ShardIndexOutOfRange);
+
+        let pool_key = ctx.accounts.pool.key();
+        let market_key = ctx.accounts.market.key();
+        let group_key = ctx.accounts.market_group.key();
+
+        let reg = &mut ctx.accounts.settlement_registry;
+        reg.pool = pool_key;
+        reg.market = market_key;
+        reg.group = group_key;
+        reg.total_shards = total_shards;
+        reg.settled_shards = 0;
+        reg.status = RegistryStatus::InProgress;
+        reg.bump = ctx.bumps.settlement_registry;
+        reg._padding = [0u8; 32];
+
+        ctx.accounts.pool.status = PoolStatus::Settling;
+        ctx.accounts.market_group.status = GroupStatus::Settling;
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -1106,4 +1172,103 @@ pub struct PostResolution<'info> {
     pub market_group: Account<'info, MarketGroup>,
 
     pub oracle_signer: Signer<'info>,
+}
+
+// ARCIUM ACCOUNT CONTEXTS
+
+#[init_computation_definition_accounts("settle_yesno", payer)]
+#[derive(Accounts)]
+pub struct InitYesNoCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program.
+    pub comp_def_account: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[init_computation_definition_accounts("settle_multioutcome", payer)]
+#[derive(Accounts)]
+pub struct InitMultiOutcomeCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program.
+    pub comp_def_account: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[init_computation_definition_accounts("settle_accuracy", payer)]
+#[derive(Accounts)]
+pub struct InitAccuracyCompDef<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    #[account(mut, address = derive_mxe_pda!())]
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(mut)]
+    /// CHECK: comp_def_account, checked by arcium program.
+    pub comp_def_account: UncheckedAccount<'info>,
+
+    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
+    /// CHECK: address_lookup_table, checked by arcium program.
+    pub address_lookup_table: UncheckedAccount<'info>,
+
+    #[account(address = LUT_PROGRAM_ID)]
+    /// CHECK: lut_program is the Address Lookup Table program.
+    pub lut_program: UncheckedAccount<'info>,
+
+    pub arcium_program: Program<'info, Arcium>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct InitSettlementRegistry<'info> {
+    #[account(mut, constraint = market_group.is_resolving() @ CypherError::MarketNotResolving)]
+    pub market_group: Account<'info, MarketGroup>,
+
+    pub market: Account<'info, Market>,
+
+    #[account(mut)]
+    pub pool: Account<'info, Pool>,
+
+    #[account(
+init, payer = backend, space = SETTLEMENT_REGISTRY_SPACE,
+seeds = [b"settlement_registry", pool.key().as_ref()], bump,
+)]
+    pub settlement_registry: Account<'info, SettlementRegistry>,
+
+    #[account(mut)]
+    pub backend: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
