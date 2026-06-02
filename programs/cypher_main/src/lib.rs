@@ -8,13 +8,14 @@ use arcium_anchor::prelude::*;
 pub mod states;
 use states::*;
 
-declare_id!("7JpiCk5c1jZdBC9moiUBQbAjdvCGqUhuMRn4r4FpSjV4");
+declare_id!("F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc");
 
 // Constants
 pub const BOND_AMOUNT: u64 = 10_000_000; // $10 USDC (6 decimals)
 pub const USDC_DECIMALS: u8 = 6;
 pub const MAX_PAYLOAD_SIZE: usize = 128;
 pub const MIN_STAKE: u64 = 1_000_000;
+pub const DISPUTE_WINDOW: i64 = 3_600;
 
 #[arcium_program]
 pub mod cypher_main {
@@ -640,6 +641,62 @@ pub mod cypher_main {
         });
         Ok(())
     }
+
+    pub fn post_resolution(
+        ctx: Context<PostResolution>,
+        resolved_value: ResolvedValue,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.market_group.is_locked(),
+            CypherError::MarketNotLocked
+        );
+        require!(
+            ctx.accounts.market_group.resolved_value.is_none(),
+            CypherError::AlreadyResolved
+        );
+
+        match &ctx.accounts.market_group.market_type {
+            MarketType::YesNo => {
+                require!(
+                    matches!(resolved_value, ResolvedValue::YesNo(_)),
+                    CypherError::InvalidResolvedValueType
+                );
+            }
+            MarketType::MultiOutcome => {
+                if let ResolvedValue::Outcome(idx) = &resolved_value {
+                    require!(*idx < 4, CypherError::OutcomeIndexOutOfRange);
+                } else {
+                    return err!(CypherError::InvalidResolvedValueType);
+                }
+            }
+            MarketType::Accuracy => {
+                require!(
+                    matches!(resolved_value, ResolvedValue::Numeric(_)),
+                    CypherError::InvalidResolvedValueType
+                );
+            }
+        }
+
+        let market_group_key = ctx.accounts.market_group.key();
+        let oracle_type = ctx.accounts.market_group.oracle_type.clone();
+        let now = Clock::get()?.unix_timestamp;
+        let dispute_deadline = now + DISPUTE_WINDOW;
+
+        let mg = &mut ctx.accounts.market_group;
+        mg.resolved_value = Some(resolved_value.clone());
+        mg.resolved_at = Some(now);
+        mg.dispute_deadline = Some(dispute_deadline);
+        mg.status = GroupStatus::Resolving;
+
+        emit!(ResolutionPosted {
+            group: market_group_key,  // saved — no conflict
+            oracle_type: oracle_type, // saved — no conflict
+            resolved_value,
+            resolved_at: now,
+            dispute_deadline,
+        });
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -1036,4 +1093,17 @@ pub struct SlashBond<'info> {
     pub treasury: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
+}
+
+// 2nd group - (oracle instructions)
+#[derive(Accounts)]
+pub struct PostResolution<'info> {
+    #[account(
+        mut,
+        constraint = market_group.is_locked() @ CypherError::MarketNotLocked,
+        constraint = market_group.oracle_authority == oracle_signer.key() @ CypherError::UnauthorizedOracle,
+    )]
+    pub market_group: Account<'info, MarketGroup>,
+
+    pub oracle_signer: Signer<'info>,
 }
