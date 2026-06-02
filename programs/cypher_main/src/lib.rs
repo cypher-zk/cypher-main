@@ -151,6 +151,31 @@ pub mod cypher_main {
         });
         Ok(())
     }
+
+    pub fn create_flat_market(ctx: Context<CreateFlatMarket>) -> Result<()> {
+        require!(
+            ctx.accounts.market_group.market_type != MarketType::Accuracy,
+            CypherError::InvalidResolvedValueType
+        );
+        require!(
+            ctx.accounts.market_group.is_open(),
+            CypherError::MarketNotOpen
+        );
+
+        let group_key = ctx.accounts.market_group.key();
+        let m = &mut ctx.accounts.market;
+        m.group = group_key;
+        m.market_type = ctx.accounts.market_group.market_type.clone();
+        m.tier_byte = 0;
+        m.bet_size = 0;
+        m.protocol_fee_bps = ctx.accounts.cypher_market.protocol_fee_bps;
+        m.lp_fee_bps = ctx.accounts.cypher_market.lp_fee_bps;
+        m.total_participants = 0;
+        m.total_volume = 0;
+        m.bump = ctx.bumps.market;
+        m._padding = [0u8; 64];
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -187,7 +212,7 @@ pub struct CreateMarketGroup<'info> {
         bump = cypher_market.bump,
         constraint = !cypher_market.is_paused @ CypherError::ProtocolPaused,
     )]
-    pub cypher_market: Account<'info, CyperMarket>,
+    pub cypher_market: Box<Account<'info, CyperMarket>>,
 
     #[account(
         init,
@@ -200,7 +225,7 @@ pub struct CreateMarketGroup<'info> {
         ],
         bump,
     )]
-    pub market_group: Account<'info, MarketGroup>,
+    pub market_group: Box<Account<'info, MarketGroup>>,
 
     #[account(
         init,
@@ -209,7 +234,7 @@ pub struct CreateMarketGroup<'info> {
         seeds = [b"bond", market_group.key().as_ref()],
         bump,
     )]
-    pub bond: Account<'info, Bond>,
+    pub bond: Box<Account<'info, Bond>>,
 
     #[account(
         init,
@@ -219,7 +244,7 @@ pub struct CreateMarketGroup<'info> {
         seeds = [b"bond_vault", bond.key().as_ref()],
         bump,
     )]
-    pub bond_vault: InterfaceAccount<'info, TokenAccount>,
+    pub bond_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// CHECK: PDA used as bond vault token authority
     #[account(
@@ -235,13 +260,13 @@ pub struct CreateMarketGroup<'info> {
         constraint = creator_token_account.owner == creator.key()
             @ CypherError::UnauthorizedAuthority,
     )]
-    pub creator_token_account: InterfaceAccount<'info, TokenAccount>,
+    pub creator_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         constraint = accepted_mint.key() == cypher_market.accepted_mint
             @ CypherError::InvalidMint,
     )]
-    pub accepted_mint: InterfaceAccount<'info, Mint>,
+    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
 
     #[account(mut)]
     pub creator: Signer<'info>,
@@ -249,4 +274,27 @@ pub struct CreateMarketGroup<'info> {
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct CreateFlatMarket<'info> {
+    #[account(seeds = [b"cypher_market"], bump = cypher_market.bump)]
+    pub cypher_market: Account<'info, CyperMarket>,
+
+    #[account(
+        constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority,
+        constraint = market_group.is_open() @ CypherError::MarketNotOpen,
+    )]
+    pub market_group: Account<'info, MarketGroup>,
+
+    #[account(
+        init, payer = creator, space = MARKET_SPACE,
+        seeds = [b"market", market_group.key().as_ref(), &[0u8]], bump,
+    )]
+    pub market: Account<'info, Market>,
+
+    #[account(mut)]
+    pub creator: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
