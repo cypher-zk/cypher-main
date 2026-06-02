@@ -201,6 +201,35 @@ pub mod cypher_main {
         m._padding = [0u8; 64];
         Ok(())
     }
+
+    pub fn create_pool(
+        ctx: Context<CreatePool>,
+        pool_index: u8,
+        pool_type: PoolType,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.market_group.is_open(),
+            CypherError::MarketNotOpen
+        );
+
+        let market_key = ctx.accounts.market.key();
+        let market_group_key = ctx.accounts.market_group.key();
+        let pool_vault_key = ctx.accounts.pool_vault.key();
+
+        let pool = &mut ctx.accounts.pool;
+        pool.market = market_key;
+        pool.group = market_group_key;
+        pool.pool_index = pool_index;
+        pool.pool_type = pool_type;
+        pool.vault = pool_vault_key;
+        pool.vault_authority_bump = ctx.bumps.vault_authority;
+        pool.participant_count = 0;
+        pool.total_staked = 0;
+        pool.status = PoolStatus::Open;
+        pool.bump = ctx.bumps.pool;
+        pool._padding = [0u8; 64];
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -346,4 +375,44 @@ pub struct CreateTierMarket<'info> {
     pub creator: Signer<'info>,
 
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+#[instruction(pool_index: u8)]
+pub struct CreatePool<'info> {
+    #[account(seeds = [b"cypher_market"], bump = cypher_market.bump)]
+    pub cypher_market: Account<'info, CyperMarket>,
+
+    #[account(constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority)]
+    pub market_group: Account<'info, MarketGroup>,
+
+    pub market: Account<'info, Market>,
+
+    #[account(
+        init, payer = creator, space = POOL_SPACE,
+        seeds = [b"pool", market.key().as_ref(), &[pool_index]], bump,
+    )]
+    pub pool: Account<'info, Pool>,
+
+    #[account(
+        init, payer = creator,
+        token::mint      = accepted_mint,
+        token::authority = vault_authority,
+        seeds = [b"vault", pool.key().as_ref()], bump,
+    )]
+    pub pool_vault: InterfaceAccount<'info, TokenAccount>,
+
+    /// CHECK: PDA — pool vault token authority
+    #[account(seeds = [b"vault_authority", pool.key().as_ref()], bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+
+    #[account(constraint = accepted_mint.key() == cypher_market.accepted_mint @ CypherError::InvalidMint)]
+    pub accepted_mint: InterfaceAccount<'info, Mint>,
+
+    #[account(mut)]
+    pub creator: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
 }
