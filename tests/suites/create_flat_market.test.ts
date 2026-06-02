@@ -100,7 +100,10 @@ describe("create_flat_market", () => {
       nonCreator.publicKey,
       2 * LAMPORTS_PER_SOL
     );
-    await g.provider.connection.confirmTransaction(airdropSig, "confirmed");
+    await g.provider.connection.confirmTransaction(
+      { signature: airdropSig, ...(await g.provider.connection.getLatestBlockhash()) },
+      "confirmed"
+    );
 
     const marketPda = deriveMarketPda(g.program.programId, yesnoGroupPda, 0);
 

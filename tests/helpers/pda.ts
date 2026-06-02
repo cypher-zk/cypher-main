@@ -96,6 +96,18 @@ export function deriveVaultAuthorityPda(
   )[0];
 }
 
+// seeds: ["vault", pool]
+// PDA-owned SPL token account holding all user stakes for a pool
+export function derivePoolVaultPda(
+  programId: PublicKey,
+  pool: PublicKey
+): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("vault"), pool.toBuffer()],
+    programId
+  )[0];
+}
+
 // seeds: ["bond_vault", bond]
 // PDA-owned SPL token account holding the creator's bond
 export function deriveBondVaultPda(
