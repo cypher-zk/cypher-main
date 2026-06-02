@@ -30,13 +30,19 @@ export function getArciumEnvConfig(): ReturnType<typeof getArciumEnv> {
 
 // Derives the compDef PDA, calls the matching init method on program,
 // then uploads the circuit. Circuit file must exist at build/<circuitName>.arcis.
-// Method name is derived: "settle_yesno" -> "initSettleYesnoCompDef"
+//
+// circuitName: the name used in the Arcium macro (e.g. "settle_yesno") — also
+//              the circuit file stem (build/settle_yesno.arcis).
+// methodName:  the Anchor method to call (e.g. "initYesnoCompDef"). If omitted,
+//              derived automatically as "init<TitleCase(circuitName)>CompDef"
+//              which works when the fn name matches the circuit name exactly.
 export async function initCompDef(
   provider: anchor.AnchorProvider,
   program: Program<any>,
   arciumProgram: Program<any>,
   payer: anchor.web3.Keypair,
-  circuitName: string
+  circuitName: string,
+  methodName?: string
 ): Promise<{ compDefPDA: PublicKey; sig: string }> {
   const baseSeed = getArciumAccountBaseSeed("ComputationDefinitionAccount");
   const offset = getCompDefAccOffset(circuitName);
@@ -47,22 +53,23 @@ export async function initCompDef(
   )[0];
 
   const mxeAccount = getMXEAccAddress(program.programId);
-  const mxeAcc = await arciumProgram.account.mxeAccount.fetch(mxeAccount);
+  const mxeAcc = await (arciumProgram.account as any).mxeAccount.fetch(mxeAccount);
   const lutAddress = getLookupTableAddress(
     program.programId,
     mxeAcc.lutOffsetSlot
   );
 
-  const methodName =
+  const resolvedMethodName =
+    methodName ??
     "init" +
-    circuitName
-      .split("_")
-      .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
-      .join("") +
-    "CompDef";
+      circuitName
+        .split("_")
+        .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
+        .join("") +
+      "CompDef";
 
   const sig = await (program.methods as any)
-    [methodName]()
+    [resolvedMethodName]()
     .accounts({
       compDefAccount: compDefPDA,
       payer: payer.publicKey,

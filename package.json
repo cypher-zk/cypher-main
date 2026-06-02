@@ -2,7 +2,8 @@
   "license": "ISC",
   "scripts": {
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
-    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check"
+    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
+    "init:comp-defs": "npx ts-node -P tsconfig.json scripts/init_comp_defs.ts"
   },
   "dependencies": {
     "@anchor-lang/core": "^1.0.2",

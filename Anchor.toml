@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-cypher_main = "F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc"
+cypher_main = "7JpiCk5c1jZdBC9moiUBQbAjdvCGqUhuMRn4r4FpSjV4"
 
 [provider]
 cluster = "localnet"

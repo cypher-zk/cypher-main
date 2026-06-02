@@ -18,3 +18,5 @@ import "./suites/return_bond.test";
 import "./suites/slash_bond.test";
 import "./suites/comp_defs.test";
 import "./suites/init_settlement_registry.test";
+import "./suites/queue_settlement.test";
+import "./suites/settle_callback.test";

@@ -9,7 +9,7 @@ use arcium_client::idl::arcium::types::{CallbackAccount, CallbackInstruction};
 pub mod states;
 use states::*;
 
-declare_id!("F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc");
+declare_id!("7JpiCk5c1jZdBC9moiUBQbAjdvCGqUhuMRn4r4FpSjV4");
 
 // Constants
 pub const BOND_AMOUNT: u64 = 10_000_000; // $10 USDC (6 decimals)

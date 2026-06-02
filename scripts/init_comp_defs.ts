@@ -1,0 +1,138 @@
+// Initializes the three computation definitions on devnet and uploads their circuits.
+// Run once before deploying / testing against devnet:
+//
+//   npx ts-node -P tsconfig.json scripts/init_comp_defs.ts
+//
+// Safe to re-run — already-initialized comp defs are skipped gracefully.
+
+import * as anchor from "@anchor-lang/core";
+import { Program } from "@anchor-lang/core";
+import { PublicKey, Connection, Keypair } from "@solana/web3.js";
+import {
+  getArciumAccountBaseSeed,
+  getArciumProgramId,
+  getArciumProgram,
+  getCompDefAccOffset,
+  getMXEAccAddress,
+  getLookupTableAddress,
+  uploadCircuit,
+} from "@arcium-hq/client";
+import { CypherMain } from "../target/types/cypher_main";
+import * as fs from "fs";
+import * as os from "os";
+
+// ── Config ────────────────────────────────────────────────────────────────────
+
+const RPC_URL =
+  process.env.RPC_URL ||
+  "https://api.devnet.solana.com";
+
+// Must match `declare_id!` in lib.rs for the devnet deployment.
+const PROGRAM_ID = new PublicKey(
+  "7JpiCk5c1jZdBC9moiUBQbAjdvCGqUhuMRn4r4FpSjV4"
+);
+
+// circuit name (used for PDA + circuit file) → Anchor method name on the program
+const CIRCUITS: { circuitName: string; methodName: string }[] = [
+  { circuitName: "settle_yesno",        methodName: "initYesnoCompDef" },
+  { circuitName: "settle_multioutcome", methodName: "initMultioutcomeCompDef" },
+  { circuitName: "settle_accuracy",     methodName: "initAccuracyCompDef" },
+];
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+async function main() {
+  const connection = new Connection(RPC_URL, "confirmed");
+
+  const keypairPath =
+    process.env.KEYPAIR_PATH || `${os.homedir()}/.config/solana/id.json`;
+  const owner = Keypair.fromSecretKey(
+    new Uint8Array(JSON.parse(fs.readFileSync(keypairPath).toString()))
+  );
+  console.log("Payer:", owner.publicKey.toBase58());
+
+  const wallet = {
+    publicKey: owner.publicKey,
+    signTransaction: async (tx: any) => { tx.partialSign(owner); return tx; },
+    signAllTransactions: async (txs: any[]) => {
+      txs.forEach((tx) => tx.partialSign(owner));
+      return txs;
+    },
+  };
+
+  const provider = new anchor.AnchorProvider(connection, wallet as any, {
+    commitment: "confirmed",
+  });
+  anchor.setProvider(provider);
+
+  const idl = JSON.parse(
+    fs.readFileSync("target/idl/cypher_main.json", "utf-8")
+  );
+  const program = new Program<CypherMain>(idl, provider);
+  const arciumProgram = getArciumProgram(provider);
+
+  const baseSeed = getArciumAccountBaseSeed("ComputationDefinitionAccount");
+
+  for (const { circuitName, methodName } of CIRCUITS) {
+    console.log(`\n─── ${circuitName} ───`);
+
+    const offset = getCompDefAccOffset(circuitName);
+    const compDefPDA = PublicKey.findProgramAddressSync(
+      [baseSeed, PROGRAM_ID.toBuffer(), offset],
+      getArciumProgramId()
+    )[0];
+    console.log("Comp def PDA:", compDefPDA.toBase58());
+
+    const mxeAccount = getMXEAccAddress(PROGRAM_ID);
+    const mxeAcc = await arciumProgram.account.mxeAccount.fetch(mxeAccount);
+    const lutAddress = getLookupTableAddress(PROGRAM_ID, mxeAcc.lutOffsetSlot);
+
+    // ── Init comp def (idempotent) ───────────────────────────────────────────
+    try {
+      const sig = await (program.methods as any)
+        [methodName]()
+        .accounts({
+          compDefAccount: compDefPDA,
+          payer: owner.publicKey,
+          mxeAccount,
+          addressLookupTable: lutAddress,
+        })
+        .signers([owner])
+        .rpc({ commitment: "confirmed" });
+
+      console.log("Init tx:", sig);
+      console.log(`Explorer: https://explorer.solana.com/tx/${sig}?cluster=devnet`);
+    } catch (err: any) {
+      if (
+        err.message?.includes("already in use") ||
+        err.message?.includes("already initialized")
+      ) {
+        console.log(`${circuitName} comp def already initialized — skipping.`);
+      } else {
+        throw err;
+      }
+    }
+
+    // ── Upload circuit ───────────────────────────────────────────────────────
+    const circuitPath = `build/${circuitName}.arcis`;
+    if (!fs.existsSync(circuitPath)) {
+      console.warn(`Circuit file not found: ${circuitPath} — skipping upload.`);
+      continue;
+    }
+    console.log(`Uploading ${circuitPath} …`);
+    const rawCircuit = fs.readFileSync(circuitPath);
+    await uploadCircuit(provider, circuitName, PROGRAM_ID, rawCircuit, true, 500, {
+      skipPreflight: true,
+      preflightCommitment: "confirmed",
+      commitment: "confirmed",
+    });
+    console.log(`${circuitName} circuit uploaded.`);
+  }
+
+  console.log("\n=== All comp defs initialized and circuits uploaded ===");
+}
+
+main().catch((err) => {
+  console.error("Failed:", err);
+  process.exit(1);
+});
