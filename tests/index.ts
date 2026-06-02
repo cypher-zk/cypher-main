@@ -11,6 +11,7 @@ import "./suites/create_pool.test";
 import "./suites/cancel_market.test";
 import "./suites/place_bet.test";
 import "./suites/place_bet_accuracy.test";
+import "./suites/lock_market.test";
 // Uncomment as suites are written:
 // import "./suites/create_tier_market.test";
 // import "./suites/place_bet.test";
