@@ -487,6 +487,58 @@ pub mod cypher_main {
         });
         Ok(())
     }
+
+    pub fn claim_payout(ctx: Context<ClaimPayout>) -> Result<()> {
+        require!(
+            ctx.accounts.position.status == PositionStatus::Settled,
+            CypherError::PositionNotSettled
+        );
+        require!(ctx.accounts.position.payout > 0, CypherError::ZeroPayout);
+        require!(
+            ctx.accounts.position.user == ctx.accounts.user.key(),
+            CypherError::UnauthorizedClaim
+        );
+
+        let payout = ctx.accounts.position.payout;
+        let position_key = ctx.accounts.position.key();
+        let pool_key = ctx.accounts.pool.key();
+        let user_key = ctx.accounts.user.key();
+        let pos_market = ctx.accounts.position.market;
+        let pos_group = ctx.accounts.position.group;
+        let now = Clock::get()?.unix_timestamp;
+
+        let authority_seeds = &[
+            b"vault_authority",
+            pool_key.as_ref(),
+            &[ctx.accounts.pool.vault_authority_bump],
+        ];
+
+        anchor_spl::token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.key(),
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.pool_vault.to_account_info(),
+                    to: ctx.accounts.user_token_account.to_account_info(),
+                    authority: ctx.accounts.vault_authority.to_account_info(),
+                },
+                &[authority_seeds],
+            ),
+            payout,
+        )?;
+
+        ctx.accounts.position.status = PositionStatus::Claimed;
+
+        emit!(PayoutClaimed {
+            position: position_key,
+            user: user_key,
+            pool: pool_key,
+            market: pos_market,
+            group: pos_group,
+            payout,
+            claimed_at: now,
+        });
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -802,4 +854,32 @@ pub struct LockMarket<'info> {
     pub market_group: Account<'info, MarketGroup>,
 
     pub pool: Account<'info, Pool>,
+}
+
+#[derive(Accounts)]
+pub struct ClaimPayout<'info> {
+    #[account(
+        mut,
+        constraint = position.user == user.key() @ CypherError::UnauthorizedClaim,
+        constraint = position.status == PositionStatus::Settled @ CypherError::PositionNotSettled,
+        constraint = position.payout > 0 @ CypherError::ZeroPayout,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(mut, constraint = pool.key() == position.pool)]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
+    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: PDA — pool vault authority
+    #[account(seeds = [b"vault_authority", pool.key().as_ref()], bump = pool.vault_authority_bump)]
+    pub vault_authority: UncheckedAccount<'info>,
+
+    #[account(mut, constraint = user_token_account.owner == user.key() @ CypherError::UnauthorizedClaim)]
+    pub user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    pub user: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
 }
