@@ -460,6 +460,33 @@ pub mod cypher_main {
         });
         Ok(())
     }
+
+    pub fn lock_market(ctx: Context<LockMarket>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now >= ctx.accounts.market_group.lock_timestamp,
+            CypherError::LockTimestampNotReached
+        );
+        require!(
+            ctx.accounts.market_group.is_open(),
+            CypherError::MarketNotOpen
+        );
+
+        // direct field mutation — no let &mut binding — no borrow conflict
+        let group_key = ctx.accounts.market_group.key();
+        let total_participants = ctx.accounts.pool.participant_count;
+        let total_volume = ctx.accounts.pool.total_staked;
+
+        ctx.accounts.market_group.status = GroupStatus::Locked;
+
+        emit!(GroupLocked {
+            group: group_key,
+            locked_at: now,
+            total_participants,
+            total_volume,
+        });
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -767,4 +794,12 @@ pub struct PlaceBetAccuracy<'info> {
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct LockMarket<'info> {
+    #[account(mut, constraint = market_group.is_open() @ CypherError::MarketNotOpen)]
+    pub market_group: Account<'info, MarketGroup>,
+
+    pub pool: Account<'info, Pool>,
 }
