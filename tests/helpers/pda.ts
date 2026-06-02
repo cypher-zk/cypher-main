@@ -96,6 +96,18 @@ export function deriveVaultAuthorityPda(
   )[0];
 }
 
+// seeds: ["bond_vault", bond]
+// PDA-owned SPL token account holding the creator's bond
+export function deriveBondVaultPda(
+  programId: PublicKey,
+  bond: PublicKey
+): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("bond_vault"), bond.toBuffer()],
+    programId
+  )[0];
+}
+
 // seeds: ["bond_vault_authority", bond]
 export function deriveBondVaultAuthorityPda(
   programId: PublicKey,

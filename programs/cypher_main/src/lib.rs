@@ -187,7 +187,7 @@ pub struct CreateMarketGroup<'info> {
         bump = cypher_market.bump,
         constraint = !cypher_market.is_paused @ CypherError::ProtocolPaused,
     )]
-    pub cypher_market: Account<'info, CyperMarket>,
+    pub cypher_market: Box<Account<'info, CyperMarket>>,
 
     #[account(
         init,
@@ -200,7 +200,7 @@ pub struct CreateMarketGroup<'info> {
         ],
         bump,
     )]
-    pub market_group: Account<'info, MarketGroup>,
+    pub market_group: Box<Account<'info, MarketGroup>>,
 
     #[account(
         init,
@@ -209,7 +209,7 @@ pub struct CreateMarketGroup<'info> {
         seeds = [b"bond", market_group.key().as_ref()],
         bump,
     )]
-    pub bond: Account<'info, Bond>,
+    pub bond: Box<Account<'info, Bond>>,
 
     #[account(
         init,
@@ -219,7 +219,7 @@ pub struct CreateMarketGroup<'info> {
         seeds = [b"bond_vault", bond.key().as_ref()],
         bump,
     )]
-    pub bond_vault: InterfaceAccount<'info, TokenAccount>,
+    pub bond_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// CHECK: PDA used as bond vault token authority
     #[account(
@@ -235,13 +235,13 @@ pub struct CreateMarketGroup<'info> {
         constraint = creator_token_account.owner == creator.key()
             @ CypherError::UnauthorizedAuthority,
     )]
-    pub creator_token_account: InterfaceAccount<'info, TokenAccount>,
+    pub creator_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         constraint = accepted_mint.key() == cypher_market.accepted_mint
             @ CypherError::InvalidMint,
     )]
-    pub accepted_mint: InterfaceAccount<'info, Mint>,
+    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
 
     #[account(mut)]
     pub creator: Signer<'info>,
