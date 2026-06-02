@@ -13,6 +13,8 @@ declare_id!("7JpiCk5c1jZdBC9moiUBQbAjdvCGqUhuMRn4r4FpSjV4");
 // Constants
 pub const BOND_AMOUNT: u64 = 10_000_000; // $10 USDC (6 decimals)
 pub const USDC_DECIMALS: u8 = 6;
+pub const MAX_PAYLOAD_SIZE: usize = 128;
+pub const MIN_STAKE: u64 = 1_000_000;
 
 #[arcium_program]
 pub mod cypher_main {
@@ -269,6 +271,101 @@ pub mod cypher_main {
         ctx.accounts.market_group.status = GroupStatus::Voided;
         Ok(())
     }
+
+    pub fn place_bet(
+        ctx: Context<PlaceBet>,
+        encrypted_payload: Vec<u8>,
+        stake_amount: u64,
+    ) -> Result<()> {
+        require!(
+            !ctx.accounts.cypher_market.is_paused,
+            CypherError::ProtocolPaused
+        );
+        require!(
+            ctx.accounts.market_group.is_open(),
+            CypherError::MarketNotOpen
+        );
+        require!(
+            ctx.accounts.pool.status == PoolStatus::Open,
+            CypherError::PoolNotOpen
+        );
+        require!(stake_amount >= MIN_STAKE, CypherError::StakeTooLow);
+        require!(
+            !encrypted_payload.is_empty(),
+            CypherError::EmptyEncryptedPayload
+        );
+        require!(
+            encrypted_payload.len() <= MAX_PAYLOAD_SIZE,
+            CypherError::PayloadTooLarge
+        );
+
+        // ── BORROW FIX: save all keys before any &mut borrows
+        // emit!() needs these but we also hold &mut pos, &mut pool, &mut market
+        let position_key = ctx.accounts.position.key();
+        let market_key = ctx.accounts.market.key();
+        let group_key = ctx.accounts.market_group.key();
+        let pool_key = ctx.accounts.pool.key();
+        let user_key = ctx.accounts.user.key();
+        let market_type = ctx.accounts.market_group.market_type.clone();
+        let now = Clock::get()?.unix_timestamp;
+
+        anchor_spl::token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.key(),
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.pool_vault.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            ),
+            stake_amount,
+        )?;
+
+        let pos = &mut ctx.accounts.position;
+        pos.pool = pool_key;
+        pos.market = market_key;
+        pos.group = group_key;
+        pos.user = user_key;
+        pos.encrypted_payload = encrypted_payload;
+        pos.stake = stake_amount;
+        pos.placed_at = now;
+        pos.payout = 0;
+        pos.status = PositionStatus::Open;
+        pos.bump = ctx.bumps.position;
+        pos._padding = [0u8; 32];
+
+        let pool = &mut ctx.accounts.pool;
+        pool.participant_count = pool
+            .participant_count
+            .checked_add(1)
+            .ok_or(CypherError::MathOverflow)?;
+        pool.total_staked = pool
+            .total_staked
+            .checked_add(stake_amount)
+            .ok_or(CypherError::MathOverflow)?;
+
+        let market = &mut ctx.accounts.market;
+        market.total_participants = market
+            .total_participants
+            .checked_add(1)
+            .ok_or(CypherError::MathOverflow)?;
+        market.total_volume = market
+            .total_volume
+            .checked_add(stake_amount)
+            .ok_or(CypherError::MathOverflow)?;
+
+        emit!(BetPlaced {
+            position: position_key, // all saved — no borrow conflicts
+            market: market_key,
+            group: group_key,
+            pool: pool_key,
+            user: user_key,
+            market_type: market_type,
+            stake: stake_amount,
+            placed_at: now,
+        });
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -486,4 +583,49 @@ pub struct CancelMarket<'info> {
     pub creator: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct PlaceBet<'info> {
+    #[account(seeds = [b"cypher_market"], bump = cypher_market.bump)]
+    pub cypher_market: Box<Account<'info, CyperMarket>>,
+
+    #[account(constraint = market_group.is_open() @ CypherError::MarketNotOpen)]
+    pub market_group: Box<Account<'info, MarketGroup>>,
+
+    #[account(mut, constraint = market.group == market_group.key())]
+    pub market: Box<Account<'info, Market>>,
+
+    #[account(
+        mut,
+        constraint = pool.market == market.key() @ CypherError::PoolNotOpen,
+        constraint = pool.status == PoolStatus::Open @ CypherError::PoolNotOpen,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [b"vault", pool.key().as_ref()], bump,
+        constraint = pool_vault.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
+    )]
+    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        init, payer = user, space = POSITION_SPACE,
+        seeds = [b"position", pool.key().as_ref(), user.key().as_ref()], bump,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(
+        mut,
+        constraint = user_token_account.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
+        constraint = user_token_account.owner == user.key() @ CypherError::UnauthorizedClaim,
+    )]
+    pub user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
