@@ -205,10 +205,10 @@ pub const MARKET_GROUP_SPACE: usize = 8    // discriminator
     + 8    // lock_timestamp: i64
     + 8    // resolve_deadline: i64
     + 9    // resolved_at: Option<i64>
-    + 1 + 8 // resolved_value: Option<ResolvedValue>  (discriminant + max data)
+    + 10   // resolved_value: Option<ResolvedValue>
+           //   1 (Option tag) + 1 (enum variant) + 8 (max: Numeric u64) = 10
     + 9    // dispute_deadline: Option<i64>
     + 1    // status: GroupStatus
-    + 1    // bond: Pubkey shortcut — actually store bump only
     + 1    // bump: u8
     + 128; // _padding: [u8; 128]
 
@@ -221,7 +221,6 @@ pub const MARKET_SPACE: usize = 8     // discriminator
     + 2    // lp_fee_bps: u16
     + 8    // total_participants: u64
     + 8    // total_volume: u64
-    + 1    // status: GroupStatus (mirrors group)
     + 1    // bump: u8
     + 64; // _padding: [u8; 64]
 
