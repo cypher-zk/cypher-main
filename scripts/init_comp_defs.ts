@@ -71,7 +71,34 @@ async function main() {
   const program = new Program<CypherMain>(idl, provider);
   const arciumProgram = getArciumProgram(provider);
 
+  // ── Preflight: verify MXE is initialized ────────────────────────────────────
+  const mxeAddress = getMXEAccAddress(PROGRAM_ID);
+  const mxeInfo = await connection.getAccountInfo(mxeAddress);
+  if (!mxeInfo) {
+    console.error(`
+ERROR: Arcium MXE account not found on devnet.
+  MXE address: ${mxeAddress.toBase58()}
+  Program ID:  ${PROGRAM_ID.toBase58()}
+
+You need to initialize the MXE first. Run:
+
+  arcium deploy \\
+    --keypair-path ~/.config/solana/id.json \\
+    --cluster-offset 456 \\
+    --recovery-set-size <N> \\
+    --rpc-url devnet \\
+    --skip-deploy        # omit this flag if the program isn't deployed yet
+
+Then re-run: yarn init:comp-defs
+`);
+    process.exit(1);
+  }
+
   const baseSeed = getArciumAccountBaseSeed("ComputationDefinitionAccount");
+  const mxeAcc = await (arciumProgram.account as any).mxeAccount.fetch(mxeAddress);
+  const lutAddress = getLookupTableAddress(PROGRAM_ID, mxeAcc.lutOffsetSlot);
+  console.log("MXE:           ", mxeAddress.toBase58());
+  console.log("LUT:           ", lutAddress.toBase58());
 
   for (const { circuitName, methodName } of CIRCUITS) {
     console.log(`\n─── ${circuitName} ───`);
@@ -83,10 +110,6 @@ async function main() {
     )[0];
     console.log("Comp def PDA:", compDefPDA.toBase58());
 
-    const mxeAccount = getMXEAccAddress(PROGRAM_ID);
-    const mxeAcc = await arciumProgram.account.mxeAccount.fetch(mxeAccount);
-    const lutAddress = getLookupTableAddress(PROGRAM_ID, mxeAcc.lutOffsetSlot);
-
     // ── Init comp def (idempotent) ───────────────────────────────────────────
     try {
       const sig = await (program.methods as any)
@@ -94,7 +117,7 @@ async function main() {
         .accounts({
           compDefAccount: compDefPDA,
           payer: owner.publicKey,
-          mxeAccount,
+          mxeAccount: mxeAddress,
           addressLookupTable: lutAddress,
         })
         .signers([owner])

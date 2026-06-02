@@ -17,11 +17,11 @@
 //
 // What each callback does (for verification once unskipped):
 //   - increments settlement_registry.settled_shards by 1
-//   - emits ShardSettled event with the winner_mask
+//   - emits ShardSettled event with encryption_key ([u8;32]), nonce (u128),
+//     ciphertext ([u8;32]) — the Arcium-encrypted output that the backend
+//     decrypts client-side to recover the winner mask / errors
 //   - if all shards done: sets registry.status = Finalizing, pool.status = Settled,
 //     emits RegistryFinalized
-//
-// Accuracy callback additionally: stores errors array (u64 × 4) instead of winner_mask.
 
 import { setupGlobal, GlobalFixtures } from "../fixtures/global";
 
@@ -38,7 +38,8 @@ describe("settle_callback", () => {
     // Prerequisites: registry InProgress, queue_settlement_yesno queued.
     // Verify:
     //   - registry.settled_shards += 1
-    //   - ShardSettled event emitted with correct winner_mask ([u8; 8])
+    //   - ShardSettled event emitted with encryption_key, nonce, ciphertext
+    //     (decrypt ciphertext client-side to recover winner_mask [u8; 8])
   });
 
   it.skip("settle_yesno_callback: last shard sets registry Finalizing + pool Settled, emits RegistryFinalized — requires Arcium", async () => {
@@ -57,8 +58,9 @@ describe("settle_callback", () => {
 
   // ── settle_accuracy_callback ──────────────────────────────────────────────────
 
-  it.skip("settle_accuracy_callback: increments settled_shards, stores errors array, emits ShardSettled — requires Arcium", async () => {
-    // Verify winner_mask in event is the errors ([u64; 4]) serialized as 32 bytes.
+  it.skip("settle_accuracy_callback: increments settled_shards, emits ShardSettled — requires Arcium", async () => {
+    // Verify ShardSettled event has encryption_key, nonce, ciphertext.
+    // Decrypt ciphertext client-side to recover errors ([u64; 4]).
   });
 
   it.skip("settle_accuracy_callback: last shard finalizes registry — requires Arcium", async () => {});

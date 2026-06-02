@@ -9,7 +9,7 @@ skip-lint = false
 cypher_main = "7JpiCk5c1jZdBC9moiUBQbAjdvCGqUhuMRn4r4FpSjV4"
 
 [provider]
-cluster = "localnet"
+cluster = "https://api.devnet.solana.com"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
