@@ -539,6 +539,56 @@ pub mod cypher_main {
         });
         Ok(())
     }
+
+    pub fn return_bond(ctx: Context<ReturnBond>) -> Result<()> {
+        require!(
+            ctx.accounts.bond.status == BondStatus::Locked,
+            CypherError::BondNotLocked
+        );
+        require!(
+            ctx.accounts.bond.creator == ctx.accounts.creator.key(),
+            CypherError::UnauthorizedBondReturn
+        );
+        require!(
+            ctx.accounts.market_group.status == GroupStatus::Settled,
+            CypherError::MarketNotSettled
+        );
+
+        let bond_key = ctx.accounts.bond.key();
+        let group_key = ctx.accounts.market_group.key();
+        let creator_key = ctx.accounts.creator.key();
+        let now = Clock::get()?.unix_timestamp;
+
+        let authority_seeds = &[
+            b"bond_vault_authority",
+            bond_key.as_ref(),
+            &[ctx.accounts.bond.vault_authority_bump],
+        ];
+
+        anchor_spl::token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.key(),
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.bond_vault.to_account_info(),
+                    to: ctx.accounts.creator_token_account.to_account_info(),
+                    authority: ctx.accounts.bond_vault_authority.to_account_info(),
+                },
+                &[authority_seeds],
+            ),
+            BOND_AMOUNT,
+        )?;
+
+        ctx.accounts.bond.status = BondStatus::Returned;
+
+        emit!(BondReturned {
+            bond: bond_key,
+            group: group_key,
+            creator: creator_key,
+            amount: BOND_AMOUNT,
+            returned_at: now,
+        });
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -880,6 +930,34 @@ pub struct ClaimPayout<'info> {
     pub user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub user: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct ReturnBond<'info> {
+    #[account(constraint = market_group.status == GroupStatus::Settled @ CypherError::MarketNotSettled)]
+    pub market_group: Account<'info, MarketGroup>,
+
+    #[account(
+        mut,
+        constraint = bond.group == market_group.key(),
+        constraint = bond.creator == creator.key() @ CypherError::UnauthorizedBondReturn,
+        constraint = bond.status == BondStatus::Locked @ CypherError::BondNotLocked,
+    )]
+    pub bond: Account<'info, Bond>,
+
+    #[account(mut, seeds = [b"bond_vault", bond.key().as_ref()], bump)]
+    pub bond_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: PDA — bond vault authority
+    #[account(seeds = [b"bond_vault_authority", bond.key().as_ref()], bump = bond.vault_authority_bump)]
+    pub bond_vault_authority: UncheckedAccount<'info>,
+
+    #[account(mut, constraint = creator_token_account.owner == creator.key() @ CypherError::UnauthorizedBondReturn)]
+    pub creator_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    pub creator: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
 }
