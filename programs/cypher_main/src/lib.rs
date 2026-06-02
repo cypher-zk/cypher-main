@@ -4,11 +4,12 @@ use anchor_spl::{
     token_interface::{Mint, TokenAccount},
 };
 use arcium_anchor::prelude::*;
+use arcium_client::idl::arcium::types::{CallbackAccount, CallbackInstruction};
 
 pub mod states;
 use states::*;
 
-declare_id!("7JpiCk5c1jZdBC9moiUBQbAjdvCGqUhuMRn4r4FpSjV4");
+declare_id!("F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc");
 
 // Constants
 pub const BOND_AMOUNT: u64 = 10_000_000; // $10 USDC (6 decimals)
@@ -763,6 +764,332 @@ pub mod cypher_main {
         ctx.accounts.market_group.status = GroupStatus::Settling;
         Ok(())
     }
+
+    // ────── QUEUE SETTLEMENTS ───────────────────────────────────────────
+
+    pub fn queue_settlement_yesno(
+        ctx: Context<QueueSettlementYesNo>,
+        computation_offset: u64,
+        encrypted_positions: Vec<[u8; 32]>,
+        _nonce: [u8; 32],
+        resolved_side: u8,
+        shard_index: u32,
+        shard_count: u32,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.market_group.market_type == MarketType::YesNo,
+            CypherError::InvalidResolvedValueType
+        );
+        require!(
+            ctx.accounts.pool.status == PoolStatus::Settling,
+            CypherError::MarketNotSettling
+        );
+        require!(
+            shard_index < ctx.accounts.settlement_registry.total_shards,
+            CypherError::ShardIndexOutOfRange
+        );
+        require!(
+            encrypted_positions.len() <= 8,
+            CypherError::ShardIndexOutOfRange
+        );
+
+        let mut builder = ArgBuilder::new().plaintext_u8(resolved_side);
+        for ct in &encrypted_positions {
+            builder = builder.encrypted_u8(*ct);
+        }
+        builder = builder.plaintext_u32(shard_count);
+        let args = builder.build();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            vec![SettleYesnoCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[],
+            )?],
+            1,
+            0,
+        )?;
+        Ok(())
+    }
+
+    pub fn queue_settlement_multioutcome(
+        ctx: Context<QueueSettlementMultiOutcome>,
+        computation_offset: u64,
+        encrypted_positions: Vec<[u8; 32]>,
+        _nonce: [u8; 32],
+        resolved_outcome: u8,
+        shard_index: u32,
+        shard_count: u32,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.market_group.market_type == MarketType::MultiOutcome,
+            CypherError::InvalidResolvedValueType
+        );
+        require!(
+            ctx.accounts.pool.status == PoolStatus::Settling,
+            CypherError::MarketNotSettling
+        );
+        require!(
+            shard_index < ctx.accounts.settlement_registry.total_shards,
+            CypherError::ShardIndexOutOfRange
+        );
+        require!(resolved_outcome < 4, CypherError::OutcomeIndexOutOfRange);
+
+        let mut builder = ArgBuilder::new().plaintext_u8(resolved_outcome);
+        for ct in &encrypted_positions {
+            builder = builder.encrypted_u8(*ct);
+        }
+        builder = builder.plaintext_u32(shard_count);
+        let args = builder.build();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            vec![SettleMultioutcomeCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[],
+            )?],
+            1,
+            0,
+        )?;
+        Ok(())
+    }
+
+    pub fn queue_settlement_accuracy(
+        ctx: Context<QueueSettlementAccuracy>,
+        computation_offset: u64,
+        encrypted_positions: Vec<[u8; 32]>,
+        _nonce: [u8; 32],
+        resolved_value: u64,
+        shard_index: u32,
+        shard_count: u32,
+    ) -> Result<()> {
+        require!(
+            ctx.accounts.market_group.market_type == MarketType::Accuracy,
+            CypherError::InvalidResolvedValueType
+        );
+        require!(
+            ctx.accounts.pool.status == PoolStatus::Settling,
+            CypherError::MarketNotSettling
+        );
+        require!(
+            shard_index < ctx.accounts.settlement_registry.total_shards,
+            CypherError::ShardIndexOutOfRange
+        );
+        require!(
+            encrypted_positions.len() <= 4,
+            CypherError::ShardIndexOutOfRange
+        );
+
+        let mut builder = ArgBuilder::new().plaintext_u64(resolved_value);
+        for ct in &encrypted_positions {
+            builder = builder.encrypted_u64(*ct);
+        }
+        builder = builder.plaintext_u32(shard_count);
+        let args = builder.build();
+
+        queue_computation(
+            ctx.accounts,
+            computation_offset,
+            args,
+            vec![SettleAccuracyCallback::callback_ix(
+                computation_offset,
+                &ctx.accounts.mxe_account,
+                &[],
+            )?],
+            1,
+            0,
+        )?;
+        Ok(())
+    }
+
+    // SETTLEMENT CALLBACKS
+
+    pub fn settle_yesno_callback(
+        ctx: Context<SettleYesnoCallback>,
+        output: SignedComputationOutputs<SettleYesnoOutput>,
+        shard_index: u32,
+    ) -> Result<()> {
+        validate_callback_ixs(
+            &ctx.accounts.instructions_sysvar,
+            &ctx.accounts.arcium_program.key(),
+        )?;
+
+        let typed_output = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(o) => o,
+            Err(_) => return err!(CypherError::InvalidZkProof),
+        };
+
+        let winner_mask: [u8; 8] = typed_output.winner_mask;
+
+        let registry_key = ctx.accounts.settlement_registry.key();
+        let pool_key = ctx.accounts.pool.key();
+        let pool_market = ctx.accounts.pool.market;
+        let pool_group = ctx.accounts.pool.group;
+        let now = Clock::get()?.unix_timestamp;
+
+        let registry = &mut ctx.accounts.settlement_registry;
+        registry.settled_shards = registry
+            .settled_shards
+            .checked_add(1)
+            .ok_or(CypherError::MathOverflow)?;
+
+        emit!(ShardSettled {
+            registry: registry_key,
+            pool: pool_key,
+            market: pool_market,
+            group: pool_group,
+            shard_index,
+            settled_shards: registry.settled_shards,
+            total_shards: registry.total_shards,
+            winner_mask: winner_mask.to_vec(),
+            settled_at: now,
+        });
+
+        if registry.is_all_shards_done() {
+            registry.status = RegistryStatus::Finalizing;
+            ctx.accounts.pool.status = PoolStatus::Settled;
+            emit!(RegistryFinalized {
+                registry: registry_key,
+                pool: pool_key,
+                market: pool_market,
+                group: pool_group,
+                total_shards: registry.total_shards,
+                finalized_at: now,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn settle_multioutcome_callback(
+        ctx: Context<SettleMultioutcomeCallback>,
+        output: SignedComputationOutputs<SettleMultioutcomeOutput>,
+        shard_index: u32,
+    ) -> Result<()> {
+        validate_callback_ixs(
+            &ctx.accounts.instructions_sysvar,
+            &ctx.accounts.arcium_program.key(),
+        )?;
+
+        let typed_output = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(o) => o,
+            Err(_) => return err!(CypherError::InvalidZkProof),
+        };
+
+        let winner_mask: [u8; 8] = typed_output.winner_mask;
+
+        let registry_key = ctx.accounts.settlement_registry.key();
+        let pool_key = ctx.accounts.pool.key();
+        let pool_market = ctx.accounts.pool.market;
+        let pool_group = ctx.accounts.pool.group;
+        let now = Clock::get()?.unix_timestamp;
+
+        let registry = &mut ctx.accounts.settlement_registry;
+        registry.settled_shards = registry
+            .settled_shards
+            .checked_add(1)
+            .ok_or(CypherError::MathOverflow)?;
+
+        emit!(ShardSettled {
+            registry: registry_key,
+            pool: pool_key,
+            market: pool_market,
+            group: pool_group,
+            shard_index,
+            settled_shards: registry.settled_shards,
+            total_shards: registry.total_shards,
+            winner_mask: winner_mask.to_vec(),
+            settled_at: now,
+        });
+
+        if registry.is_all_shards_done() {
+            registry.status = RegistryStatus::Finalizing;
+            ctx.accounts.pool.status = PoolStatus::Settled;
+            emit!(RegistryFinalized {
+                registry: registry_key,
+                pool: pool_key,
+                market: pool_market,
+                group: pool_group,
+                total_shards: registry.total_shards,
+                finalized_at: now,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn settle_accuracy_callback(
+        ctx: Context<SettleAccuracyCallback>,
+        output: SignedComputationOutputs<SettleAccuracyOutput>,
+        shard_index: u32,
+    ) -> Result<()> {
+        validate_callback_ixs(
+            &ctx.accounts.instructions_sysvar,
+            &ctx.accounts.arcium_program.key(),
+        )?;
+
+        let typed_output = match output.verify_output(
+            &ctx.accounts.cluster_account,
+            &ctx.accounts.computation_account,
+        ) {
+            Ok(o) => o,
+            Err(_) => return err!(CypherError::InvalidZkProof),
+        };
+
+        let errors: [u64; 4] = typed_output.errors;
+        let mut error_bytes = Vec::with_capacity(32);
+        for e in errors.iter() {
+            error_bytes.extend_from_slice(&e.to_le_bytes());
+        }
+
+        let registry_key = ctx.accounts.settlement_registry.key();
+        let pool_key = ctx.accounts.pool.key();
+        let pool_market = ctx.accounts.pool.market;
+        let pool_group = ctx.accounts.pool.group;
+        let now = Clock::get()?.unix_timestamp;
+
+        let registry = &mut ctx.accounts.settlement_registry;
+        registry.settled_shards = registry
+            .settled_shards
+            .checked_add(1)
+            .ok_or(CypherError::MathOverflow)?;
+
+        emit!(ShardSettled {
+            registry: registry_key,
+            pool: pool_key,
+            market: pool_market,
+            group: pool_group,
+            shard_index,
+            settled_shards: registry.settled_shards,
+            total_shards: registry.total_shards,
+            winner_mask: error_bytes,
+            settled_at: now,
+        });
+
+        if registry.is_all_shards_done() {
+            registry.status = RegistryStatus::Finalizing;
+            ctx.accounts.pool.status = PoolStatus::Settled;
+            emit!(RegistryFinalized {
+                registry: registry_key,
+                pool: pool_key,
+                market: pool_market,
+                group: pool_group,
+                total_shards: registry.total_shards,
+                finalized_at: now,
+            });
+        }
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -1262,13 +1589,391 @@ pub struct InitSettlementRegistry<'info> {
     pub pool: Account<'info, Pool>,
 
     #[account(
-init, payer = backend, space = SETTLEMENT_REGISTRY_SPACE,
-seeds = [b"settlement_registry", pool.key().as_ref()], bump,
-)]
+    init, payer = backend, space = SETTLEMENT_REGISTRY_SPACE,
+    seeds = [b"settlement_registry", pool.key().as_ref()], bump,
+    )]
     pub settlement_registry: Account<'info, SettlementRegistry>,
 
     #[account(mut)]
     pub backend: Signer<'info>,
 
     pub system_program: Program<'info, System>,
+}
+
+// ────── QUEUE SETTLEMENT ACCOUNTS ───────────────────────────────────────
+
+#[queue_computation_accounts("settle_yesno", payer)]
+#[derive(Accounts)]
+pub struct QueueSettlementYesNo<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(
+        seeds = [SIGN_PDA_SEED],
+        bump,
+    )]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+
+    #[account(mut)]
+    /// CHECK: mempool account
+    pub mempool_account: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    /// CHECK: executing pool
+    pub executing_pool: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    /// CHECK: computation account
+    pub computation_account: UncheckedAccount<'info>,
+
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    #[account(mut)]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+
+    #[account(mut)]
+    pub pool_account: Box<Account<'info, FeePool>>,
+
+    #[account(mut)]
+    pub clock_account: Box<Account<'info, ClockAccount>>,
+
+    pub system_program: Program<'info, System>,
+
+    pub arcium_program: Program<'info, Arcium>,
+
+    // Custom protocol accounts
+    pub market_group: Box<Account<'info, MarketGroup>>,
+
+    #[account(mut)]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(mut)]
+    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
+}
+
+#[queue_computation_accounts("settle_multioutcome", payer)]
+#[derive(Accounts)]
+pub struct QueueSettlementMultiOutcome<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(
+        seeds = [SIGN_PDA_SEED],
+        bump,
+    )]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+
+    #[account(mut)]
+    /// CHECK: mempool account
+    pub mempool_account: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    /// CHECK: executing pool
+    pub executing_pool: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    /// CHECK: computation account
+    pub computation_account: UncheckedAccount<'info>,
+
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    #[account(mut)]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+
+    #[account(mut)]
+    pub pool_account: Box<Account<'info, FeePool>>,
+
+    #[account(mut)]
+    pub clock_account: Box<Account<'info, ClockAccount>>,
+
+    pub system_program: Program<'info, System>,
+
+    pub arcium_program: Program<'info, Arcium>,
+
+    // Custom protocol accounts
+    pub market_group: Box<Account<'info, MarketGroup>>,
+
+    #[account(mut)]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(mut)]
+    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
+}
+
+#[queue_computation_accounts("settle_accuracy", payer)]
+#[derive(Accounts)]
+pub struct QueueSettlementAccuracy<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    #[account(
+        seeds = [SIGN_PDA_SEED],
+        bump,
+    )]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+
+    #[account(mut)]
+    /// CHECK: mempool account
+    pub mempool_account: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    /// CHECK: executing pool
+    pub executing_pool: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    /// CHECK: computation account
+    pub computation_account: UncheckedAccount<'info>,
+
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    #[account(mut)]
+    pub cluster_account: Box<Account<'info, Cluster>>,
+
+    #[account(mut)]
+    pub pool_account: Box<Account<'info, FeePool>>,
+
+    #[account(mut)]
+    pub clock_account: Box<Account<'info, ClockAccount>>,
+
+    pub system_program: Program<'info, System>,
+
+    pub arcium_program: Program<'info, Arcium>,
+
+    // Custom protocol accounts
+    pub market_group: Box<Account<'info, MarketGroup>>,
+
+    #[account(mut)]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(mut)]
+    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
+}
+
+// OUTPUT TYPES (plain Rust, not encrypted — Arcium network decrypts for callbacks)
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct SettleYesnoOutput {
+    pub winner_mask: [u8; 8],
+}
+
+impl HasSize for SettleYesnoOutput {
+    const SIZE: usize = 8;
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct SettleMultioutcomeOutput {
+    pub winner_mask: [u8; 8],
+}
+
+impl HasSize for SettleMultioutcomeOutput {
+    const SIZE: usize = 8;
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct SettleAccuracyOutput {
+    pub errors: [u64; 4],
+}
+
+impl HasSize for SettleAccuracyOutput {
+    const SIZE: usize = 32;
+}
+
+//  SETTLEMENT CALLBACK ACCOUNTS
+
+#[derive(Accounts)]
+pub struct SettleYesnoCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    /// CHECK: computation account
+    pub computation_account: UncheckedAccount<'info>,
+
+    pub cluster_account: Box<Account<'info, Cluster>>,
+
+    /// CHECK: instructions sysvar
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
+
+    #[account(mut)]
+    pub pool: Box<Account<'info, Pool>>,
+}
+
+impl CallbackCompAccs for SettleYesnoCallback<'_> {
+    fn callback_ix(
+        computation_offset: u64,
+        mxe_account: &MXEAccount,
+        extra_accs: &[CallbackAccount],
+    ) -> Result<CallbackInstruction> {
+        let mut accounts = Vec::with_capacity(extra_accs.len() + 6);
+        accounts.push(CallbackAccount {
+            pubkey: ARCIUM_PROG_ID,
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_comp_def_pda!(comp_def_offset("settle_yesno")),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_mxe_pda!(),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_comp_pda!(computation_offset, mxe_account),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_cluster_pda!(mxe_account),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: INSTRUCTIONS_SYSVAR_ID,
+            is_writable: false,
+        });
+        accounts.extend_from_slice(extra_accs);
+
+        Ok(CallbackInstruction {
+            program_id: crate::ID,
+            discriminator: crate::instruction::SettleYesnoCallback::DISCRIMINATOR.to_vec(),
+            accounts,
+        })
+    }
+}
+
+#[derive(Accounts)]
+pub struct SettleMultioutcomeCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    /// CHECK: computation account
+    pub computation_account: UncheckedAccount<'info>,
+
+    pub cluster_account: Box<Account<'info, Cluster>>,
+
+    /// CHECK: instructions sysvar
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
+
+    #[account(mut)]
+    pub pool: Box<Account<'info, Pool>>,
+}
+
+impl CallbackCompAccs for SettleMultioutcomeCallback<'_> {
+    fn callback_ix(
+        computation_offset: u64,
+        mxe_account: &MXEAccount,
+        extra_accs: &[CallbackAccount],
+    ) -> Result<CallbackInstruction> {
+        let mut accounts = Vec::with_capacity(extra_accs.len() + 6);
+        accounts.push(CallbackAccount {
+            pubkey: ARCIUM_PROG_ID,
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_comp_def_pda!(comp_def_offset("settle_multioutcome")),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_mxe_pda!(),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_comp_pda!(computation_offset, mxe_account),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_cluster_pda!(mxe_account),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: INSTRUCTIONS_SYSVAR_ID,
+            is_writable: false,
+        });
+        accounts.extend_from_slice(extra_accs);
+
+        Ok(CallbackInstruction {
+            program_id: crate::ID,
+            discriminator: crate::instruction::SettleMultioutcomeCallback::DISCRIMINATOR.to_vec(),
+            accounts,
+        })
+    }
+}
+
+#[derive(Accounts)]
+pub struct SettleAccuracyCallback<'info> {
+    pub arcium_program: Program<'info, Arcium>,
+
+    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
+
+    pub mxe_account: Box<Account<'info, MXEAccount>>,
+
+    /// CHECK: computation account
+    pub computation_account: UncheckedAccount<'info>,
+
+    pub cluster_account: Box<Account<'info, Cluster>>,
+
+    /// CHECK: instructions sysvar
+    pub instructions_sysvar: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
+
+    #[account(mut)]
+    pub pool: Box<Account<'info, Pool>>,
+}
+
+impl CallbackCompAccs for SettleAccuracyCallback<'_> {
+    fn callback_ix(
+        computation_offset: u64,
+        mxe_account: &MXEAccount,
+        extra_accs: &[CallbackAccount],
+    ) -> Result<CallbackInstruction> {
+        let mut accounts = Vec::with_capacity(extra_accs.len() + 6);
+        accounts.push(CallbackAccount {
+            pubkey: ARCIUM_PROG_ID,
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_comp_def_pda!(comp_def_offset("settle_accuracy")),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_mxe_pda!(),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_comp_pda!(computation_offset, mxe_account),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: derive_cluster_pda!(mxe_account),
+            is_writable: false,
+        });
+        accounts.push(CallbackAccount {
+            pubkey: INSTRUCTIONS_SYSVAR_ID,
+            is_writable: false,
+        });
+        accounts.extend_from_slice(extra_accs);
+
+        Ok(CallbackInstruction {
+            program_id: crate::ID,
+            discriminator: crate::instruction::SettleAccuracyCallback::DISCRIMINATOR.to_vec(),
+            accounts,
+        })
+    }
 }
