@@ -366,6 +366,100 @@ pub mod cypher_main {
         });
         Ok(())
     }
+
+    pub fn place_bet_accuracy(
+        ctx: Context<PlaceBetAccuracy>,
+        encrypted_payload: Vec<u8>,
+    ) -> Result<()> {
+        require!(
+            !ctx.accounts.cypher_market.is_paused,
+            CypherError::ProtocolPaused
+        );
+        require!(
+            ctx.accounts.market_group.is_open(),
+            CypherError::MarketNotOpen
+        );
+        require!(
+            ctx.accounts.pool.status == PoolStatus::Open,
+            CypherError::PoolNotOpen
+        );
+        require!(
+            !encrypted_payload.is_empty(),
+            CypherError::EmptyEncryptedPayload
+        );
+        require!(
+            encrypted_payload.len() <= MAX_PAYLOAD_SIZE,
+            CypherError::PayloadTooLarge
+        );
+
+        let bet_size = ctx.accounts.market.bet_size;
+        require!(bet_size > 0, CypherError::StakeTooLow);
+
+        // ── BORROW FIX: save all keys before &mut borrows
+        let position_key = ctx.accounts.position.key();
+        let market_key = ctx.accounts.market.key();
+        let group_key = ctx.accounts.market_group.key();
+        let pool_key = ctx.accounts.pool.key();
+        let user_key = ctx.accounts.user.key();
+        let now = Clock::get()?.unix_timestamp;
+
+        anchor_spl::token::transfer(
+            CpiContext::new(
+                ctx.accounts.token_program.key(),
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.pool_vault.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            ),
+            bet_size,
+        )?;
+
+        let pos = &mut ctx.accounts.position;
+        pos.pool = pool_key;
+        pos.market = market_key;
+        pos.group = group_key;
+        pos.user = user_key;
+        pos.encrypted_payload = encrypted_payload;
+        pos.stake = bet_size;
+        pos.placed_at = now;
+        pos.payout = 0;
+        pos.status = PositionStatus::Open;
+        pos.bump = ctx.bumps.position;
+        pos._padding = [0u8; 32];
+
+        let pool = &mut ctx.accounts.pool;
+        pool.participant_count = pool
+            .participant_count
+            .checked_add(1)
+            .ok_or(CypherError::MathOverflow)?;
+        pool.total_staked = pool
+            .total_staked
+            .checked_add(bet_size)
+            .ok_or(CypherError::MathOverflow)?;
+
+        let market = &mut ctx.accounts.market;
+        market.total_participants = market
+            .total_participants
+            .checked_add(1)
+            .ok_or(CypherError::MathOverflow)?;
+        market.total_volume = market
+            .total_volume
+            .checked_add(bet_size)
+            .ok_or(CypherError::MathOverflow)?;
+
+        emit!(BetPlaced {
+            position: position_key,
+            market: market_key,
+            group: group_key,
+            pool: pool_key,
+            user: user_key,
+            market_type: MarketType::Accuracy,
+            stake: bet_size,
+            placed_at: now,
+        });
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -587,6 +681,51 @@ pub struct CancelMarket<'info> {
 
 #[derive(Accounts)]
 pub struct PlaceBet<'info> {
+    #[account(seeds = [b"cypher_market"], bump = cypher_market.bump)]
+    pub cypher_market: Box<Account<'info, CyperMarket>>,
+
+    #[account(constraint = market_group.is_open() @ CypherError::MarketNotOpen)]
+    pub market_group: Box<Account<'info, MarketGroup>>,
+
+    #[account(mut, constraint = market.group == market_group.key())]
+    pub market: Box<Account<'info, Market>>,
+
+    #[account(
+        mut,
+        constraint = pool.market == market.key() @ CypherError::PoolNotOpen,
+        constraint = pool.status == PoolStatus::Open @ CypherError::PoolNotOpen,
+    )]
+    pub pool: Box<Account<'info, Pool>>,
+
+    #[account(
+        mut,
+        seeds = [b"vault", pool.key().as_ref()], bump,
+        constraint = pool_vault.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
+    )]
+    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(
+        init, payer = user, space = POSITION_SPACE,
+        seeds = [b"position", pool.key().as_ref(), user.key().as_ref()], bump,
+    )]
+    pub position: Box<Account<'info, Position>>,
+
+    #[account(
+        mut,
+        constraint = user_token_account.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
+        constraint = user_token_account.owner == user.key() @ CypherError::UnauthorizedClaim,
+    )]
+    pub user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct PlaceBetAccuracy<'info> {
     #[account(seeds = [b"cypher_market"], bump = cypher_market.bump)]
     pub cypher_market: Box<Account<'info, CyperMarket>>,
 
