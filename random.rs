@@ -1,35 +1,44 @@
 use anchor_lang::prelude::*;
-use anchor_spl::{
-    token::Token,
-    token_interface::{Mint, TokenAccount},
+
+// anchor_spl::token::{Token, TokenAccount, Mint} implement anchor_lang::Owner
+// anchor_spl::token_interface::{TokenAccount, Mint} do NOT → use InterfaceAccount for those
+// Here we use anchor_spl::token — plain SPL Token, correct for USDC
+use anchor_spl::token::{Mint, Token, TokenAccount};
+
+// Arcium SDK
+use arcium_anchor::{
+    program::ArciumProgram,
+    state::{
+        ComputationAccount, ComputationDefinitionAccount, ExecutingPool, MXEAccount, MempoolAccount,
+    },
+    SignedComputationOutputs, ARCIUM_CLUSTER_SEED, COMP_DEF_OFFSET_ACCURACY,
+    COMP_DEF_OFFSET_MULTIOUTCOME, COMP_DEF_OFFSET_YESNO,
 };
-use arcium_anchor::prelude::*;
 
-pub mod states;
-use states::*;
+use encrypted_ixs::{SettleAccuracyOutput, SettleMultioutcomeOutput, SettleYesnoOutput};
 
-declare_id!("F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc");
+pub mod state;
+use state::*;
 
-// Constants
-pub const BOND_AMOUNT: u64 = 10_000_000; // $10 USDC (6 decimals)
-pub const USDC_DECIMALS: u8 = 6;
-pub const MAX_PAYLOAD_SIZE: usize = 128;
+declare_id!("CYPHERKLYj1bZtWv7Xut6Snw13ab1DwdJia5ZSEeVeej");
+
+// ─── CONSTANTS ────────────────────────────────────────────────────────────────
+
+pub const BOND_AMOUNT: u64 = 10_000_000;
 pub const MIN_STAKE: u64 = 1_000_000;
 pub const DISPUTE_WINDOW: i64 = 3_600;
 pub const YESNO_SHARD_SIZE: u32 = 8;
 pub const ACCURACY_SHARD_SIZE: u32 = 4;
+pub const MAX_PAYLOAD_SIZE: usize = 128;
 
-// Arcium computation definition offsets — one per circuit
-const COMP_DEF_OFFSET_YESNO: u32 = comp_def_offset("settle_yesno");
-const COMP_DEF_OFFSET_MULTIOUTCOME: u32 = comp_def_offset("settle_multioutcome");
-const COMP_DEF_OFFSET_ACCURACY: u32 = comp_def_offset("settle_accuracy");
-
-#[arcium_program]
-pub mod cypher_main {
-
+#[program]
+pub mod cypher_program {
     use super::*;
 
-    // initialize instruction
+    // ═══════════════════════════════════════════════════════════════════════
+    // GROUP 1 — NORMAL INSTRUCTIONS
+    // ═══════════════════════════════════════════════════════════════════════
+
     pub fn initialize(
         ctx: Context<Initialize>,
         protocol_fee_bps: u16,
@@ -41,6 +50,7 @@ pub mod cypher_main {
             CypherError::FeeTooHigh
         );
         require!(accuracy_platform_fee_bps <= 5000, CypherError::FeeTooHigh);
+
         let cm = &mut ctx.accounts.cypher_market;
         cm.authority = ctx.accounts.authority.key();
         cm.treasury = ctx.accounts.treasury.key();
@@ -86,7 +96,9 @@ pub mod cypher_main {
             CypherError::ResolveDeadlineNotPassed
         );
         match oracle_type {
-            OracleType::Pyth => require!(pyth_feed.is_some(), CypherError::OracleTypeNotSupported),
+            OracleType::Pyth => {
+                require!(pyth_feed.is_some(), CypherError::OracleTypeNotSupported)
+            }
             OracleType::Switchboard => require!(
                 switchboard_feed.is_some(),
                 CypherError::OracleTypeNotSupported
@@ -649,6 +661,10 @@ pub mod cypher_main {
         Ok(())
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // GROUP 2 — ORACLE
+    // ═══════════════════════════════════════════════════════════════════════
+
     pub fn post_resolution(
         ctx: Context<PostResolution>,
         resolved_value: ResolvedValue,
@@ -684,6 +700,8 @@ pub mod cypher_main {
             }
         }
 
+        // ── BORROW FIX: save group key and oracle_type before &mut borrow
+        // emit!() uses group key AND mg.oracle_type — can't have both at once
         let market_group_key = ctx.accounts.market_group.key();
         let oracle_type = ctx.accounts.market_group.oracle_type.clone();
         let now = Clock::get()?.unix_timestamp;
@@ -705,20 +723,58 @@ pub mod cypher_main {
         Ok(())
     }
 
-    // ────── ARCIUM COMPUTATION DEFINITION INIT ──────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════
+    // GROUP 3 — ARCIUM
+    // ═══════════════════════════════════════════════════════════════════════
 
-    pub fn init_yesno_comp_def(ctx: Context<InitYesNoCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+    pub fn init_yesno_comp_def(ctx: Context<InitCompDef>) -> Result<()> {
+        arcium_anchor::cpi::init_comp_def(
+            CpiContext::new_with_signer(
+                ctx.accounts.arcium_program.to_account_info(),
+                arcium_anchor::cpi::accounts::InitCompDef {
+                    payer: ctx.accounts.authority.to_account_info(),
+                    comp_def: ctx.accounts.comp_def.to_account_info(),
+                    mxe: ctx.accounts.mxe_account.to_account_info(),
+                    system_program: ctx.accounts.system_program.to_account_info(),
+                },
+                &[],
+            ),
+            COMP_DEF_OFFSET_YESNO,
+        )?;
         Ok(())
     }
 
-    pub fn init_multioutcome_comp_def(ctx: Context<InitMultiOutcomeCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+    pub fn init_multioutcome_comp_def(ctx: Context<InitCompDef>) -> Result<()> {
+        arcium_anchor::cpi::init_comp_def(
+            CpiContext::new_with_signer(
+                ctx.accounts.arcium_program.to_account_info(),
+                arcium_anchor::cpi::accounts::InitCompDef {
+                    payer: ctx.accounts.authority.to_account_info(),
+                    comp_def: ctx.accounts.comp_def.to_account_info(),
+                    mxe: ctx.accounts.mxe_account.to_account_info(),
+                    system_program: ctx.accounts.system_program.to_account_info(),
+                },
+                &[],
+            ),
+            COMP_DEF_OFFSET_MULTIOUTCOME,
+        )?;
         Ok(())
     }
 
-    pub fn init_accuracy_comp_def(ctx: Context<InitAccuracyCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+    pub fn init_accuracy_comp_def(ctx: Context<InitCompDef>) -> Result<()> {
+        arcium_anchor::cpi::init_comp_def(
+            CpiContext::new_with_signer(
+                ctx.accounts.arcium_program.to_account_info(),
+                arcium_anchor::cpi::accounts::InitCompDef {
+                    payer: ctx.accounts.authority.to_account_info(),
+                    comp_def: ctx.accounts.comp_def.to_account_info(),
+                    mxe: ctx.accounts.mxe_account.to_account_info(),
+                    system_program: ctx.accounts.system_program.to_account_info(),
+                },
+                &[],
+            ),
+            COMP_DEF_OFFSET_ACCURACY,
+        )?;
         Ok(())
     }
 
@@ -764,13 +820,11 @@ pub mod cypher_main {
         Ok(())
     }
 
-    // ────── QUEUE SETTLEMENTS ───────────────────────────────────────────
-
     pub fn queue_settlement_yesno(
-        ctx: Context<QueueSettlementYesNo>,
+        ctx: Context<QueueSettlement>,
         computation_offset: u64,
-        encrypted_positions: Vec<[u8; 32]>,
-        _nonce: [u8; 32],
+        encrypted_positions: Vec<Vec<u8>>,
+        nonce: [u8; 32],
         resolved_side: u8,
         shard_index: u32,
         shard_count: u32,
@@ -792,33 +846,35 @@ pub mod cypher_main {
             CypherError::ShardIndexOutOfRange
         );
 
-        let mut builder = ArgBuilder::new().plaintext_u8(resolved_side);
-        for ct in &encrypted_positions {
-            builder = builder.encrypted_u8(*ct);
-        }
-        builder = builder.plaintext_u32(shard_count);
-        let args = builder.build();
-
-        queue_computation(
-            ctx.accounts,
+        arcium_anchor::cpi::queue_computation(
+            CpiContext::new(
+                ctx.accounts.arcium_program.to_account_info(),
+                arcium_anchor::cpi::accounts::QueueComputation {
+                    payer: ctx.accounts.backend.to_account_info(),
+                    computation: ctx.accounts.computation_account.to_account_info(),
+                    comp_def: ctx.accounts.comp_def.to_account_info(),
+                    mempool: ctx.accounts.mempool.to_account_info(),
+                    executing_pool: ctx.accounts.executing_pool.to_account_info(),
+                    mxe: ctx.accounts.mxe_account.to_account_info(),
+                    system_program: ctx.accounts.system_program.to_account_info(),
+                },
+            ),
             computation_offset,
-            args,
-            vec![SettleYesnoCallback::callback_ix(
-                computation_offset,
-                &ctx.accounts.mxe_account,
-                &[],
-            )?],
-            1,
-            0,
+            arcium_anchor::build_inputs!(
+            secret: encrypted_positions,
+            plaintext: resolved_side,
+            plaintext: shard_count,
+            ),
+            nonce,
         )?;
         Ok(())
     }
 
     pub fn queue_settlement_multioutcome(
-        ctx: Context<QueueSettlementMultiOutcome>,
+        ctx: Context<QueueSettlement>,
         computation_offset: u64,
-        encrypted_positions: Vec<[u8; 32]>,
-        _nonce: [u8; 32],
+        encrypted_positions: Vec<Vec<u8>>,
+        nonce: [u8; 32],
         resolved_outcome: u8,
         shard_index: u32,
         shard_count: u32,
@@ -837,33 +893,35 @@ pub mod cypher_main {
         );
         require!(resolved_outcome < 4, CypherError::OutcomeIndexOutOfRange);
 
-        let mut builder = ArgBuilder::new().plaintext_u8(resolved_outcome);
-        for ct in &encrypted_positions {
-            builder = builder.encrypted_u8(*ct);
-        }
-        builder = builder.plaintext_u32(shard_count);
-        let args = builder.build();
-
-        queue_computation(
-            ctx.accounts,
+        arcium_anchor::cpi::queue_computation(
+            CpiContext::new(
+                ctx.accounts.arcium_program.to_account_info(),
+                arcium_anchor::cpi::accounts::QueueComputation {
+                    payer: ctx.accounts.backend.to_account_info(),
+                    computation: ctx.accounts.computation_account.to_account_info(),
+                    comp_def: ctx.accounts.comp_def.to_account_info(),
+                    mempool: ctx.accounts.mempool.to_account_info(),
+                    executing_pool: ctx.accounts.executing_pool.to_account_info(),
+                    mxe: ctx.accounts.mxe_account.to_account_info(),
+                    system_program: ctx.accounts.system_program.to_account_info(),
+                },
+            ),
             computation_offset,
-            args,
-            vec![SettleMultioutcomeCallback::callback_ix(
-                computation_offset,
-                &ctx.accounts.mxe_account,
-                &[],
-            )?],
-            1,
-            0,
+            arcium_anchor::build_inputs!(
+            secret: encrypted_positions,
+            plaintext: resolved_outcome,
+            plaintext: shard_count,
+            ),
+            nonce,
         )?;
         Ok(())
     }
 
     pub fn queue_settlement_accuracy(
-        ctx: Context<QueueSettlementAccuracy>,
+        ctx: Context<QueueSettlement>,
         computation_offset: u64,
-        encrypted_positions: Vec<[u8; 32]>,
-        _nonce: [u8; 32],
+        encrypted_positions: Vec<Vec<u8>>,
+        nonce: [u8; 32],
         resolved_value: u64,
         shard_index: u32,
         shard_count: u32,
@@ -885,55 +943,54 @@ pub mod cypher_main {
             CypherError::ShardIndexOutOfRange
         );
 
-        let mut builder = ArgBuilder::new().plaintext_u64(resolved_value);
-        for ct in &encrypted_positions {
-            builder = builder.encrypted_u64(*ct);
-        }
-        builder = builder.plaintext_u32(shard_count);
-        let args = builder.build();
-
-        queue_computation(
-            ctx.accounts,
+        arcium_anchor::cpi::queue_computation(
+            CpiContext::new(
+                ctx.accounts.arcium_program.to_account_info(),
+                arcium_anchor::cpi::accounts::QueueComputation {
+                    payer: ctx.accounts.backend.to_account_info(),
+                    computation: ctx.accounts.computation_account.to_account_info(),
+                    comp_def: ctx.accounts.comp_def.to_account_info(),
+                    mempool: ctx.accounts.mempool.to_account_info(),
+                    executing_pool: ctx.accounts.executing_pool.to_account_info(),
+                    mxe: ctx.accounts.mxe_account.to_account_info(),
+                    system_program: ctx.accounts.system_program.to_account_info(),
+                },
+            ),
             computation_offset,
-            args,
-            vec![SettleAccuracyCallback::callback_ix(
-                computation_offset,
-                &ctx.accounts.mxe_account,
-                &[],
-            )?],
-            1,
-            0,
+            arcium_anchor::build_inputs!(
+            secret: encrypted_positions,
+            plaintext: resolved_value,
+            plaintext: shard_count,
+            ),
+            nonce,
         )?;
         Ok(())
     }
 
-    // SETTLEMENT CALLBACKS
-
     pub fn settle_yesno_callback(
-        ctx: Context<SettleYesnoCallback>,
+        ctx: Context<SettleCallback>,
         output: SignedComputationOutputs<SettleYesnoOutput>,
         shard_index: u32,
     ) -> Result<()> {
-        validate_callback_ixs(
-            &ctx.accounts.instructions_sysvar,
-            &ctx.accounts.arcium_program.key(),
-        )?;
+        let typed_output = output
+            .verify_output(
+                &ctx.accounts.cluster_account,
+                &ctx.accounts.computation_account,
+            )
+            .map_err(|_| CypherError::InvalidZkProof)?;
 
-        let typed_output = match output.verify_output(
-            &ctx.accounts.cluster_account,
-            &ctx.accounts.computation_account,
-        ) {
-            Ok(o) => o,
-            Err(_) => return err!(CypherError::InvalidZkProof),
-        };
+        let winner_mask: [u8; 8] = typed_output.winner_mask;
 
-        let enc = typed_output.field_0;
-
+        // ── BORROW FIX: save all keys/fields used in emit!() BEFORE &mut borrows
+        // Both ShardSettled and RegistryFinalized emit!() reference registry.key()
+        // while registry (mut borrow) is still alive for field reads like registry.total_shards
         let registry_key = ctx.accounts.settlement_registry.key();
         let pool_key = ctx.accounts.pool.key();
         let pool_market = ctx.accounts.pool.market;
         let pool_group = ctx.accounts.pool.group;
         let now = Clock::get()?.unix_timestamp;
+
+        send_settlement_fees(&ctx)?;
 
         let registry = &mut ctx.accounts.settlement_registry;
         registry.settled_shards = registry
@@ -942,28 +999,27 @@ pub mod cypher_main {
             .ok_or(CypherError::MathOverflow)?;
 
         emit!(ShardSettled {
-            registry: registry_key,
-            pool: pool_key,
-            market: pool_market,
-            group: pool_group,
+            registry: registry_key, // saved
+            pool: pool_key,         // saved
+            market: pool_market,    // saved
+            group: pool_group,      // saved
             shard_index,
             settled_shards: registry.settled_shards,
             total_shards: registry.total_shards,
-            encryption_key: enc.encryption_key,
-            nonce: enc.nonce,
-            ciphertext: enc.ciphertexts[0],
+            winner_mask: winner_mask.to_vec(),
             settled_at: now,
         });
 
         if registry.is_all_shards_done() {
+            let total_shards = registry.total_shards;
             registry.status = RegistryStatus::Finalizing;
             ctx.accounts.pool.status = PoolStatus::Settled;
             emit!(RegistryFinalized {
-                registry: registry_key,
-                pool: pool_key,
-                market: pool_market,
-                group: pool_group,
-                total_shards: registry.total_shards,
+                registry: registry_key, // saved
+                pool: pool_key,         // saved
+                market: pool_market,    // saved
+                group: pool_group,      // saved
+                total_shards,           // saved from registry before status change
                 finalized_at: now,
             });
         }
@@ -971,30 +1027,27 @@ pub mod cypher_main {
     }
 
     pub fn settle_multioutcome_callback(
-        ctx: Context<SettleMultioutcomeCallback>,
+        ctx: Context<SettleCallback>,
         output: SignedComputationOutputs<SettleMultioutcomeOutput>,
         shard_index: u32,
     ) -> Result<()> {
-        validate_callback_ixs(
-            &ctx.accounts.instructions_sysvar,
-            &ctx.accounts.arcium_program.key(),
-        )?;
+        let typed_output = output
+            .verify_output(
+                &ctx.accounts.cluster_account,
+                &ctx.accounts.computation_account,
+            )
+            .map_err(|_| CypherError::InvalidZkProof)?;
 
-        let typed_output = match output.verify_output(
-            &ctx.accounts.cluster_account,
-            &ctx.accounts.computation_account,
-        ) {
-            Ok(o) => o,
-            Err(_) => return err!(CypherError::InvalidZkProof),
-        };
+        let winner_mask: [u8; 8] = typed_output.winner_mask;
 
-        let enc = typed_output.field_0;
-
+        // ── BORROW FIX: same pattern as yesno callback
         let registry_key = ctx.accounts.settlement_registry.key();
         let pool_key = ctx.accounts.pool.key();
         let pool_market = ctx.accounts.pool.market;
         let pool_group = ctx.accounts.pool.group;
         let now = Clock::get()?.unix_timestamp;
+
+        send_settlement_fees(&ctx)?;
 
         let registry = &mut ctx.accounts.settlement_registry;
         registry.settled_shards = registry
@@ -1010,13 +1063,12 @@ pub mod cypher_main {
             shard_index,
             settled_shards: registry.settled_shards,
             total_shards: registry.total_shards,
-            encryption_key: enc.encryption_key,
-            nonce: enc.nonce,
-            ciphertext: enc.ciphertexts[0],
+            winner_mask: winner_mask.to_vec(),
             settled_at: now,
         });
 
         if registry.is_all_shards_done() {
+            let total_shards = registry.total_shards;
             registry.status = RegistryStatus::Finalizing;
             ctx.accounts.pool.status = PoolStatus::Settled;
             emit!(RegistryFinalized {
@@ -1024,7 +1076,7 @@ pub mod cypher_main {
                 pool: pool_key,
                 market: pool_market,
                 group: pool_group,
-                total_shards: registry.total_shards,
+                total_shards,
                 finalized_at: now,
             });
         }
@@ -1032,25 +1084,24 @@ pub mod cypher_main {
     }
 
     pub fn settle_accuracy_callback(
-        ctx: Context<SettleAccuracyCallback>,
+        ctx: Context<SettleCallback>,
         output: SignedComputationOutputs<SettleAccuracyOutput>,
         shard_index: u32,
     ) -> Result<()> {
-        validate_callback_ixs(
-            &ctx.accounts.instructions_sysvar,
-            &ctx.accounts.arcium_program.key(),
-        )?;
+        let typed_output = output
+            .verify_output(
+                &ctx.accounts.cluster_account,
+                &ctx.accounts.computation_account,
+            )
+            .map_err(|_| CypherError::InvalidZkProof)?;
 
-        let typed_output = match output.verify_output(
-            &ctx.accounts.cluster_account,
-            &ctx.accounts.computation_account,
-        ) {
-            Ok(o) => o,
-            Err(_) => return err!(CypherError::InvalidZkProof),
-        };
+        let errors: [u64; 4] = typed_output.errors;
+        let mut error_bytes = Vec::with_capacity(32);
+        for e in errors.iter() {
+            error_bytes.extend_from_slice(&e.to_le_bytes());
+        }
 
-        let enc = typed_output.field_0;
-
+        // ── BORROW FIX: same pattern as yesno/multioutcome
         let registry_key = ctx.accounts.settlement_registry.key();
         let pool_key = ctx.accounts.pool.key();
         let pool_market = ctx.accounts.pool.market;
@@ -1071,13 +1122,12 @@ pub mod cypher_main {
             shard_index,
             settled_shards: registry.settled_shards,
             total_shards: registry.total_shards,
-            encryption_key: enc.encryption_key,
-            nonce: enc.nonce,
-            ciphertext: enc.ciphertexts[0],
+            winner_mask: error_bytes,
             settled_at: now,
         });
 
         if registry.is_all_shards_done() {
+            let total_shards = registry.total_shards;
             registry.status = RegistryStatus::Finalizing;
             ctx.accounts.pool.status = PoolStatus::Settled;
             emit!(RegistryFinalized {
@@ -1085,7 +1135,7 @@ pub mod cypher_main {
                 pool: pool_key,
                 market: pool_market,
                 group: pool_group,
-                total_shards: registry.total_shards,
+                total_shards,
                 finalized_at: now,
             });
         }
@@ -1139,10 +1189,7 @@ pub mod cypher_main {
         Ok(())
     }
 
-    pub fn write_position_payout(
-        ctx: Context<WritePositionPayout>,
-        payout: u64,
-    ) -> Result<()> {
+    pub fn write_position_payout(ctx: Context<WritePositionPayout>, payout: u64) -> Result<()> {
         require!(
             ctx.accounts.settlement_registry.status == RegistryStatus::Finalizing
                 || ctx.accounts.settlement_registry.status == RegistryStatus::Complete,
@@ -1172,41 +1219,33 @@ pub mod cypher_main {
     }
 }
 
-// ─── HELPER ───────────────────────────────────────────────────────────────────
+// ─── HELPER
 
-fn send_settlement_fees<'info>(
-    pool: &Account<'info, Pool>,
-    market: &Account<'info, Market>,
-    pool_vault: &InterfaceAccount<'info, TokenAccount>,
-    vault_authority: &UncheckedAccount<'info>,
-    creator_token_account: &InterfaceAccount<'info, TokenAccount>,
-    treasury: &InterfaceAccount<'info, TokenAccount>,
-    token_program: &Program<'info, Token>,
-) -> Result<()> {
-    let total = pool.total_staked;
+fn send_settlement_fees(ctx: &Context<SettleCallback>) -> Result<()> {
+    let total = ctx.accounts.pool.total_staked;
     let proto_fee = total
-        .checked_mul(market.protocol_fee_bps as u64)
+        .checked_mul(ctx.accounts.market.protocol_fee_bps as u64)
         .ok_or(CypherError::MathOverflow)?
         .checked_div(10_000)
         .ok_or(CypherError::DivisionByZero)?;
     let lp_fee = total
-        .checked_mul(market.lp_fee_bps as u64)
+        .checked_mul(ctx.accounts.market.lp_fee_bps as u64)
         .ok_or(CypherError::MathOverflow)?
         .checked_div(10_000)
         .ok_or(CypherError::DivisionByZero)?;
 
-    let pool_key = pool.key();
-    let bump = pool.vault_authority_bump;
+    let pool_key = ctx.accounts.pool.key();
+    let bump = ctx.accounts.pool.vault_authority_bump;
     let seeds = &[b"vault_authority", pool_key.as_ref(), &[bump]];
 
     if lp_fee > 0 {
         anchor_spl::token::transfer(
             CpiContext::new_with_signer(
-                token_program.key(),
+                ctx.accounts.token_program.key(),
                 anchor_spl::token::Transfer {
-                    from: pool_vault.to_account_info(),
-                    to: creator_token_account.to_account_info(),
-                    authority: vault_authority.to_account_info(),
+                    from: ctx.accounts.pool_vault.to_account_info(),
+                    to: ctx.accounts.creator_token_account.to_account_info(),
+                    authority: ctx.accounts.vault_authority.to_account_info(),
                 },
                 &[seeds],
             ),
@@ -1217,11 +1256,11 @@ fn send_settlement_fees<'info>(
     if proto_fee > 0 {
         anchor_spl::token::transfer(
             CpiContext::new_with_signer(
-                token_program.key(),
+                ctx.accounts.token_program.key(),
                 anchor_spl::token::Transfer {
-                    from: pool_vault.to_account_info(),
-                    to: treasury.to_account_info(),
-                    authority: vault_authority.to_account_info(),
+                    from: ctx.accounts.pool_vault.to_account_info(),
+                    to: ctx.accounts.treasury.to_account_info(),
+                    authority: ctx.accounts.vault_authority.to_account_info(),
                 },
                 &[seeds],
             ),
@@ -1231,25 +1270,20 @@ fn send_settlement_fees<'info>(
     Ok(())
 }
 
-// All account instruction below
+// ─── ACCOUNT CONTEXTS ─────────────────────────────────────────────────────────
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(
-        init,
-        payer = authority,
-        space = CYPHER_MARKET_SPACE,
-        seeds = [b"cypher_market"],
-        bump,
-    )]
+init, payer = authority, space = CYPHER_MARKET_SPACE,
+seeds = [b"cypher_market"], bump,
+)]
     pub cypher_market: Account<'info, CyperMarket>,
 
-    #[account(
-        constraint = treasury.mint == accepted_mint.key() @ CypherError::InvalidMint,
-    )]
-    pub treasury: InterfaceAccount<'info, TokenAccount>,
+    #[account(constraint = treasury.mint == accepted_mint.key() @ CypherError::InvalidMint)]
+    pub treasury: Account<'info, TokenAccount>,
 
-    pub accepted_mint: InterfaceAccount<'info, Mint>,
+    pub accepted_mint: Account<'info, Mint>,
 
     #[account(mut)]
     pub authority: Signer<'info>,
@@ -1260,66 +1294,45 @@ pub struct Initialize<'info> {
 #[derive(Accounts)]
 pub struct CreateMarketGroup<'info> {
     #[account(
-        mut,
-        seeds = [b"cypher_market"],
-        bump = cypher_market.bump,
-        constraint = !cypher_market.is_paused @ CypherError::ProtocolPaused,
-    )]
-    pub cypher_market: Box<Account<'info, CyperMarket>>,
+mut, seeds = [b"cypher_market"], bump = cypher_market.bump,
+constraint = !cypher_market.is_paused @ CypherError::ProtocolPaused,
+)]
+    pub cypher_market: Account<'info, CyperMarket>,
 
     #[account(
-        init,
-        payer = creator,
-        space = MARKET_GROUP_SPACE,
-        seeds = [
-            b"market_group",
-            cypher_market.key().as_ref(),
-            &cypher_market.market_count.to_le_bytes(),
-        ],
-        bump,
-    )]
-    pub market_group: Box<Account<'info, MarketGroup>>,
+init, payer = creator, space = MARKET_GROUP_SPACE,
+seeds = [b"market_group", cypher_market.key().as_ref(), &cypher_market.market_count.to_le_bytes()],
+bump,
+)]
+    pub market_group: Account<'info, MarketGroup>,
 
     #[account(
-        init,
-        payer = creator,
-        space = BOND_SPACE,
-        seeds = [b"bond", market_group.key().as_ref()],
-        bump,
-    )]
-    pub bond: Box<Account<'info, Bond>>,
+init, payer = creator, space = BOND_SPACE,
+seeds = [b"bond", market_group.key().as_ref()], bump,
+)]
+    pub bond: Account<'info, Bond>,
 
     #[account(
-        init,
-        payer = creator,
-        token::mint     = accepted_mint,
-        token::authority = bond_vault_authority,
-        seeds = [b"bond_vault", bond.key().as_ref()],
-        bump,
-    )]
-    pub bond_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+init, payer = creator,
+token::mint = accepted_mint,
+token::authority = bond_vault_authority,
+seeds = [b"bond_vault", bond.key().as_ref()], bump,
+)]
+    pub bond_vault: Account<'info, TokenAccount>,
 
-    /// CHECK: PDA used as bond vault token authority
-    #[account(
-        seeds = [b"bond_vault_authority", bond.key().as_ref()],
-        bump,
-    )]
+    /// CHECK: PDA — bond vault token authority
+    #[account(seeds = [b"bond_vault_authority", bond.key().as_ref()], bump)]
     pub bond_vault_authority: UncheckedAccount<'info>,
 
     #[account(
-        mut,
-        constraint = creator_token_account.mint == cypher_market.accepted_mint
-            @ CypherError::InvalidMint,
-        constraint = creator_token_account.owner == creator.key()
-            @ CypherError::UnauthorizedAuthority,
-    )]
-    pub creator_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+mut,
+constraint = creator_token_account.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
+constraint = creator_token_account.owner == creator.key() @ CypherError::UnauthorizedAuthority,
+)]
+    pub creator_token_account: Account<'info, TokenAccount>,
 
-    #[account(
-        constraint = accepted_mint.key() == cypher_market.accepted_mint
-            @ CypherError::InvalidMint,
-    )]
-    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(constraint = accepted_mint.key() == cypher_market.accepted_mint @ CypherError::InvalidMint)]
+    pub accepted_mint: Account<'info, Mint>,
 
     #[account(mut)]
     pub creator: Signer<'info>,
@@ -1335,15 +1348,15 @@ pub struct CreateFlatMarket<'info> {
     pub cypher_market: Account<'info, CyperMarket>,
 
     #[account(
-        constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority,
-        constraint = market_group.is_open() @ CypherError::MarketNotOpen,
-    )]
+constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority,
+constraint = market_group.is_open() @ CypherError::MarketNotOpen,
+)]
     pub market_group: Account<'info, MarketGroup>,
 
     #[account(
-        init, payer = creator, space = MARKET_SPACE,
-        seeds = [b"market", market_group.key().as_ref(), &[0u8]], bump,
-    )]
+init, payer = creator, space = MARKET_SPACE,
+seeds = [b"market", market_group.key().as_ref(), &[0u8]], bump,
+)]
     pub market: Account<'info, Market>,
 
     #[account(mut)]
@@ -1359,15 +1372,15 @@ pub struct CreateTierMarket<'info> {
     pub cypher_market: Account<'info, CyperMarket>,
 
     #[account(
-        constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority,
-        constraint = market_group.is_open() @ CypherError::MarketNotOpen,
-    )]
+constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority,
+constraint = market_group.is_open() @ CypherError::MarketNotOpen,
+)]
     pub market_group: Account<'info, MarketGroup>,
 
     #[account(
-        init, payer = creator, space = MARKET_SPACE,
-        seeds = [b"market", market_group.key().as_ref(), &[tier.as_byte()]], bump,
-    )]
+init, payer = creator, space = MARKET_SPACE,
+seeds = [b"market", market_group.key().as_ref(), &[tier.as_byte()]], bump,
+)]
     pub market: Account<'info, Market>,
 
     #[account(mut)]
@@ -1380,33 +1393,33 @@ pub struct CreateTierMarket<'info> {
 #[instruction(pool_index: u8)]
 pub struct CreatePool<'info> {
     #[account(seeds = [b"cypher_market"], bump = cypher_market.bump)]
-    pub cypher_market: Box<Account<'info, CyperMarket>>,
+    pub cypher_market: Account<'info, CyperMarket>,
 
     #[account(constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority)]
-    pub market_group: Box<Account<'info, MarketGroup>>,
+    pub market_group: Account<'info, MarketGroup>,
 
-    pub market: Box<Account<'info, Market>>,
-
-    #[account(
-        init, payer = creator, space = POOL_SPACE,
-        seeds = [b"pool", market.key().as_ref(), &[pool_index]], bump,
-    )]
-    pub pool: Box<Account<'info, Pool>>,
+    pub market: Account<'info, Market>,
 
     #[account(
-        init, payer = creator,
-        token::mint      = accepted_mint,
-        token::authority = vault_authority,
-        seeds = [b"vault", pool.key().as_ref()], bump,
-    )]
-    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+init, payer = creator, space = POOL_SPACE,
+seeds = [b"pool", market.key().as_ref(), &[pool_index]], bump,
+)]
+    pub pool: Account<'info, Pool>,
+
+    #[account(
+init, payer = creator,
+token::mint = accepted_mint,
+token::authority = vault_authority,
+seeds = [b"vault", pool.key().as_ref()], bump,
+)]
+    pub pool_vault: Account<'info, TokenAccount>,
 
     /// CHECK: PDA — pool vault token authority
     #[account(seeds = [b"vault_authority", pool.key().as_ref()], bump)]
     pub vault_authority: UncheckedAccount<'info>,
 
     #[account(constraint = accepted_mint.key() == cypher_market.accepted_mint @ CypherError::InvalidMint)]
-    pub accepted_mint: Box<InterfaceAccount<'info, Mint>>,
+    pub accepted_mint: Account<'info, Mint>,
 
     #[account(mut)]
     pub creator: Signer<'info>,
@@ -1419,16 +1432,16 @@ pub struct CreatePool<'info> {
 #[derive(Accounts)]
 pub struct CancelMarket<'info> {
     #[account(
-        mut,
-        constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority,
-    )]
+mut,
+constraint = market_group.creator == creator.key() @ CypherError::UnauthorizedAuthority,
+)]
     pub market_group: Account<'info, MarketGroup>,
 
     #[account(mut, constraint = bond.group == market_group.key())]
     pub bond: Account<'info, Bond>,
 
     #[account(mut, seeds = [b"bond_vault", bond.key().as_ref()], bump)]
-    pub bond_vault: InterfaceAccount<'info, TokenAccount>,
+    pub bond_vault: Account<'info, TokenAccount>,
 
     /// CHECK: PDA — bond vault authority
     #[account(seeds = [b"bond_vault_authority", bond.key().as_ref()], bump)]
@@ -1438,10 +1451,10 @@ pub struct CancelMarket<'info> {
     pub pool: Account<'info, Pool>,
 
     #[account(
-        mut,
-        constraint = creator_token_account.owner == creator.key() @ CypherError::UnauthorizedAuthority,
-    )]
-    pub creator_token_account: InterfaceAccount<'info, TokenAccount>,
+mut,
+constraint = creator_token_account.owner == creator.key() @ CypherError::UnauthorizedAuthority,
+)]
+    pub creator_token_account: Account<'info, TokenAccount>,
 
     pub creator: Signer<'info>,
 
@@ -1451,40 +1464,40 @@ pub struct CancelMarket<'info> {
 #[derive(Accounts)]
 pub struct PlaceBet<'info> {
     #[account(seeds = [b"cypher_market"], bump = cypher_market.bump)]
-    pub cypher_market: Box<Account<'info, CyperMarket>>,
+    pub cypher_market: Account<'info, CyperMarket>,
 
     #[account(constraint = market_group.is_open() @ CypherError::MarketNotOpen)]
-    pub market_group: Box<Account<'info, MarketGroup>>,
+    pub market_group: Account<'info, MarketGroup>,
 
     #[account(mut, constraint = market.group == market_group.key())]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
 
     #[account(
-        mut,
-        constraint = pool.market == market.key() @ CypherError::PoolNotOpen,
-        constraint = pool.status == PoolStatus::Open @ CypherError::PoolNotOpen,
-    )]
-    pub pool: Box<Account<'info, Pool>>,
+mut,
+constraint = pool.market == market.key() @ CypherError::PoolNotOpen,
+constraint = pool.status == PoolStatus::Open @ CypherError::PoolNotOpen,
+)]
+    pub pool: Account<'info, Pool>,
 
     #[account(
-        mut,
-        seeds = [b"vault", pool.key().as_ref()], bump,
-        constraint = pool_vault.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
-    )]
-    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+mut,
+seeds = [b"vault", pool.key().as_ref()], bump,
+constraint = pool_vault.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
+)]
+    pub pool_vault: Account<'info, TokenAccount>,
 
     #[account(
-        init, payer = user, space = POSITION_SPACE,
-        seeds = [b"position", pool.key().as_ref(), user.key().as_ref()], bump,
-    )]
-    pub position: Box<Account<'info, Position>>,
+init, payer = user, space = POSITION_SPACE,
+seeds = [b"position", pool.key().as_ref(), user.key().as_ref()], bump,
+)]
+    pub position: Account<'info, Position>,
 
     #[account(
-        mut,
-        constraint = user_token_account.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
-        constraint = user_token_account.owner == user.key() @ CypherError::UnauthorizedClaim,
-    )]
-    pub user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+mut,
+constraint = user_token_account.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
+constraint = user_token_account.owner == user.key() @ CypherError::UnauthorizedClaim,
+)]
+    pub user_token_account: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub user: Signer<'info>,
@@ -1496,40 +1509,40 @@ pub struct PlaceBet<'info> {
 #[derive(Accounts)]
 pub struct PlaceBetAccuracy<'info> {
     #[account(seeds = [b"cypher_market"], bump = cypher_market.bump)]
-    pub cypher_market: Box<Account<'info, CyperMarket>>,
+    pub cypher_market: Account<'info, CyperMarket>,
 
     #[account(constraint = market_group.is_open() @ CypherError::MarketNotOpen)]
-    pub market_group: Box<Account<'info, MarketGroup>>,
+    pub market_group: Account<'info, MarketGroup>,
 
     #[account(mut, constraint = market.group == market_group.key())]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
 
     #[account(
-        mut,
-        constraint = pool.market == market.key() @ CypherError::PoolNotOpen,
-        constraint = pool.status == PoolStatus::Open @ CypherError::PoolNotOpen,
-    )]
-    pub pool: Box<Account<'info, Pool>>,
+mut,
+constraint = pool.market == market.key() @ CypherError::PoolNotOpen,
+constraint = pool.status == PoolStatus::Open @ CypherError::PoolNotOpen,
+)]
+    pub pool: Account<'info, Pool>,
 
     #[account(
-        mut,
-        seeds = [b"vault", pool.key().as_ref()], bump,
-        constraint = pool_vault.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
-    )]
-    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+mut,
+seeds = [b"vault", pool.key().as_ref()], bump,
+constraint = pool_vault.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
+)]
+    pub pool_vault: Account<'info, TokenAccount>,
 
     #[account(
-        init, payer = user, space = POSITION_SPACE,
-        seeds = [b"position", pool.key().as_ref(), user.key().as_ref()], bump,
-    )]
-    pub position: Box<Account<'info, Position>>,
+init, payer = user, space = POSITION_SPACE,
+seeds = [b"position", pool.key().as_ref(), user.key().as_ref()], bump,
+)]
+    pub position: Account<'info, Position>,
 
     #[account(
-        mut,
-        constraint = user_token_account.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
-        constraint = user_token_account.owner == user.key() @ CypherError::UnauthorizedClaim,
-    )]
-    pub user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+mut,
+constraint = user_token_account.mint == cypher_market.accepted_mint @ CypherError::InvalidMint,
+constraint = user_token_account.owner == user.key() @ CypherError::UnauthorizedClaim,
+)]
+    pub user_token_account: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub user: Signer<'info>,
@@ -1549,25 +1562,25 @@ pub struct LockMarket<'info> {
 #[derive(Accounts)]
 pub struct ClaimPayout<'info> {
     #[account(
-        mut,
-        constraint = position.user == user.key() @ CypherError::UnauthorizedClaim,
-        constraint = position.status == PositionStatus::Settled @ CypherError::PositionNotSettled,
-        constraint = position.payout > 0 @ CypherError::ZeroPayout,
-    )]
-    pub position: Box<Account<'info, Position>>,
+mut,
+constraint = position.user == user.key() @ CypherError::UnauthorizedClaim,
+constraint = position.status == PositionStatus::Settled @ CypherError::PositionNotSettled,
+constraint = position.payout > 0 @ CypherError::ZeroPayout,
+)]
+    pub position: Account<'info, Position>,
 
     #[account(mut, constraint = pool.key() == position.pool)]
-    pub pool: Box<Account<'info, Pool>>,
+    pub pool: Account<'info, Pool>,
 
     #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
-    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub pool_vault: Account<'info, TokenAccount>,
 
     /// CHECK: PDA — pool vault authority
     #[account(seeds = [b"vault_authority", pool.key().as_ref()], bump = pool.vault_authority_bump)]
     pub vault_authority: UncheckedAccount<'info>,
 
     #[account(mut, constraint = user_token_account.owner == user.key() @ CypherError::UnauthorizedClaim)]
-    pub user_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub user_token_account: Account<'info, TokenAccount>,
 
     pub user: Signer<'info>,
 
@@ -1580,22 +1593,22 @@ pub struct ReturnBond<'info> {
     pub market_group: Account<'info, MarketGroup>,
 
     #[account(
-        mut,
-        constraint = bond.group == market_group.key(),
-        constraint = bond.creator == creator.key() @ CypherError::UnauthorizedBondReturn,
-        constraint = bond.status == BondStatus::Locked @ CypherError::BondNotLocked,
-    )]
+mut,
+constraint = bond.group == market_group.key(),
+constraint = bond.creator == creator.key() @ CypherError::UnauthorizedBondReturn,
+constraint = bond.status == BondStatus::Locked @ CypherError::BondNotLocked,
+)]
     pub bond: Account<'info, Bond>,
 
     #[account(mut, seeds = [b"bond_vault", bond.key().as_ref()], bump)]
-    pub bond_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub bond_vault: Account<'info, TokenAccount>,
 
     /// CHECK: PDA — bond vault authority
     #[account(seeds = [b"bond_vault_authority", bond.key().as_ref()], bump = bond.vault_authority_bump)]
     pub bond_vault_authority: UncheckedAccount<'info>,
 
     #[account(mut, constraint = creator_token_account.owner == creator.key() @ CypherError::UnauthorizedBondReturn)]
-    pub creator_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub creator_token_account: Account<'info, TokenAccount>,
 
     pub creator: Signer<'info>,
 
@@ -1608,112 +1621,57 @@ pub struct SlashBond<'info> {
     pub market_group: Account<'info, MarketGroup>,
 
     #[account(
-        mut,
-        constraint = bond.group == market_group.key(),
-        constraint = bond.status == BondStatus::Locked @ CypherError::BondNotLocked,
-    )]
+mut,
+constraint = bond.group == market_group.key(),
+constraint = bond.status == BondStatus::Locked @ CypherError::BondNotLocked,
+)]
     pub bond: Account<'info, Bond>,
 
     #[account(mut, seeds = [b"bond_vault", bond.key().as_ref()], bump)]
-    pub bond_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub bond_vault: Account<'info, TokenAccount>,
 
     /// CHECK: PDA — bond vault authority
     #[account(seeds = [b"bond_vault_authority", bond.key().as_ref()], bump = bond.vault_authority_bump)]
     pub bond_vault_authority: UncheckedAccount<'info>,
 
     #[account(mut)]
-    pub treasury: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub treasury: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
 }
 
-// 2nd group - (oracle instructions)
 #[derive(Accounts)]
 pub struct PostResolution<'info> {
     #[account(
-        mut,
-        constraint = market_group.is_locked() @ CypherError::MarketNotLocked,
-        constraint = market_group.oracle_authority == oracle_signer.key() @ CypherError::UnauthorizedOracle,
-    )]
+mut,
+constraint = market_group.is_locked() @ CypherError::MarketNotLocked,
+constraint = market_group.oracle_authority == oracle_signer.key() @ CypherError::UnauthorizedOracle,
+)]
     pub market_group: Account<'info, MarketGroup>,
 
     pub oracle_signer: Signer<'info>,
 }
 
-// ARCIUM ACCOUNT CONTEXTS
-
-#[init_computation_definition_accounts("settle_yesno", payer)]
 #[derive(Accounts)]
-pub struct InitYesNoCompDef<'info> {
+pub struct InitCompDef<'info> {
+    #[account(
+seeds = [b"cypher_market"], bump = cypher_market.bump,
+constraint = cypher_market.authority == authority.key() @ CypherError::UnauthorizedAuthority,
+)]
+    pub cypher_market: Account<'info, CyperMarket>,
+
+    /// CHECK: Arcium MXE account
+    #[account(seeds = [ARCIUM_CLUSTER_SEED], seeds::program = arcium_program.key(), bump)]
+    pub mxe_account: UncheckedAccount<'info>,
+
+    /// CHECK: Computation definition — created by Arcium program
     #[account(mut)]
-    pub payer: Signer<'info>,
-
-    #[account(mut, address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-
-    #[account(mut)]
-    /// CHECK: comp_def_account, checked by arcium program.
-    pub comp_def_account: UncheckedAccount<'info>,
-
-    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
-    /// CHECK: address_lookup_table, checked by arcium program.
-    pub address_lookup_table: UncheckedAccount<'info>,
-
-    #[account(address = LUT_PROGRAM_ID)]
-    /// CHECK: lut_program is the Address Lookup Table program.
-    pub lut_program: UncheckedAccount<'info>,
-
-    pub arcium_program: Program<'info, Arcium>,
-    pub system_program: Program<'info, System>,
-}
-
-#[init_computation_definition_accounts("settle_multioutcome", payer)]
-#[derive(Accounts)]
-pub struct InitMultiOutcomeCompDef<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-
-    #[account(mut, address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    pub comp_def: UncheckedAccount<'info>,
 
     #[account(mut)]
-    /// CHECK: comp_def_account, checked by arcium program.
-    pub comp_def_account: UncheckedAccount<'info>,
+    pub authority: Signer<'info>,
 
-    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
-    /// CHECK: address_lookup_table, checked by arcium program.
-    pub address_lookup_table: UncheckedAccount<'info>,
-
-    #[account(address = LUT_PROGRAM_ID)]
-    /// CHECK: lut_program is the Address Lookup Table program.
-    pub lut_program: UncheckedAccount<'info>,
-
-    pub arcium_program: Program<'info, Arcium>,
-    pub system_program: Program<'info, System>,
-}
-
-#[init_computation_definition_accounts("settle_accuracy", payer)]
-#[derive(Accounts)]
-pub struct InitAccuracyCompDef<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-
-    #[account(mut, address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-
-    #[account(mut)]
-    /// CHECK: comp_def_account, checked by arcium program.
-    pub comp_def_account: UncheckedAccount<'info>,
-
-    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
-    /// CHECK: address_lookup_table, checked by arcium program.
-    pub address_lookup_table: UncheckedAccount<'info>,
-
-    #[account(address = LUT_PROGRAM_ID)]
-    /// CHECK: lut_program is the Address Lookup Table program.
-    pub lut_program: UncheckedAccount<'info>,
-
-    pub arcium_program: Program<'info, Arcium>,
+    pub arcium_program: Program<'info, ArciumProgram>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1728,9 +1686,9 @@ pub struct InitSettlementRegistry<'info> {
     pub pool: Account<'info, Pool>,
 
     #[account(
-    init, payer = backend, space = SETTLEMENT_REGISTRY_SPACE,
-    seeds = [b"settlement_registry", pool.key().as_ref()], bump,
-    )]
+init, payer = backend, space = SETTLEMENT_REGISTRY_SPACE,
+seeds = [b"settlement_registry", pool.key().as_ref()], bump,
+)]
     pub settlement_registry: Account<'info, SettlementRegistry>,
 
     #[account(mut)]
@@ -1739,284 +1697,79 @@ pub struct InitSettlementRegistry<'info> {
     pub system_program: Program<'info, System>,
 }
 
-// ────── QUEUE SETTLEMENT ACCOUNTS ───────────────────────────────────────
-
-#[queue_computation_accounts("settle_yesno", payer)]
 #[derive(Accounts)]
-pub struct QueueSettlementYesNo<'info> {
+pub struct QueueSettlement<'info> {
+    pub market_group: Account<'info, MarketGroup>,
+
+    #[account(constraint = pool.status == PoolStatus::Settling @ CypherError::MarketNotSettling)]
+    pub pool: Account<'info, Pool>,
+
+    #[account(constraint = settlement_registry.pool == pool.key())]
+    pub settlement_registry: Account<'info, SettlementRegistry>,
+
+    /// CHECK: Arcium MXE
+    #[account(seeds = [ARCIUM_CLUSTER_SEED], seeds::program = arcium_program.key(), bump)]
+    pub mxe_account: UncheckedAccount<'info>,
+
+    /// CHECK: Computation definition
+    pub comp_def: UncheckedAccount<'info>,
+
+    /// CHECK: Arcium mempool
     #[account(mut)]
-    pub payer: Signer<'info>,
+    pub mempool: UncheckedAccount<'info>,
 
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-
-    #[account(
-        seeds = [SIGN_PDA_SEED],
-        bump,
-    )]
-    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
-
-    #[account(mut)]
-    /// CHECK: mempool account
-    pub mempool_account: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    /// CHECK: executing pool
+    /// CHECK: Arcium executing pool
     pub executing_pool: UncheckedAccount<'info>,
 
+    /// CHECK: Computation account
     #[account(mut)]
-    /// CHECK: computation account
     pub computation_account: UncheckedAccount<'info>,
 
-    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
-
     #[account(mut)]
-    pub cluster_account: Box<Account<'info, Cluster>>,
+    pub backend: Signer<'info>,
 
-    #[account(mut)]
-    pub pool_account: Box<Account<'info, FeePool>>,
-
-    #[account(mut)]
-    pub clock_account: Box<Account<'info, ClockAccount>>,
-
+    pub arcium_program: Program<'info, ArciumProgram>,
     pub system_program: Program<'info, System>,
-
-    pub arcium_program: Program<'info, Arcium>,
-
-    // Custom protocol accounts
-    pub market_group: Box<Account<'info, MarketGroup>>,
-
-    #[account(mut)]
-    pub pool: Box<Account<'info, Pool>>,
-
-    #[account(mut)]
-    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
 }
 
-#[queue_computation_accounts("settle_multioutcome", payer)]
 #[derive(Accounts)]
-pub struct QueueSettlementMultiOutcome<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
+pub struct SettleCallback<'info> {
+    #[account(seeds = [b"cypher_market"], bump = cypher_market.bump)]
+    pub cypher_market: Account<'info, CyperMarket>,
 
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
+    pub market_group: Account<'info, MarketGroup>,
 
-    #[account(
-        seeds = [SIGN_PDA_SEED],
-        bump,
-    )]
-    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+    pub market: Account<'info, Market>,
 
     #[account(mut)]
-    /// CHECK: mempool account
-    pub mempool_account: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    /// CHECK: executing pool
-    pub executing_pool: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    /// CHECK: computation account
-    pub computation_account: UncheckedAccount<'info>,
-
-    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
-
-    #[account(mut)]
-    pub cluster_account: Box<Account<'info, Cluster>>,
-
-    #[account(mut)]
-    pub pool_account: Box<Account<'info, FeePool>>,
-
-    #[account(mut)]
-    pub clock_account: Box<Account<'info, ClockAccount>>,
-
-    pub system_program: Program<'info, System>,
-
-    pub arcium_program: Program<'info, Arcium>,
-
-    // Custom protocol accounts
-    pub market_group: Box<Account<'info, MarketGroup>>,
-
-    #[account(mut)]
-    pub pool: Box<Account<'info, Pool>>,
-
-    #[account(mut)]
-    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
-}
-
-#[queue_computation_accounts("settle_accuracy", payer)]
-#[derive(Accounts)]
-pub struct QueueSettlementAccuracy<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-
-    #[account(
-        seeds = [SIGN_PDA_SEED],
-        bump,
-    )]
-    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
-
-    #[account(mut)]
-    /// CHECK: mempool account
-    pub mempool_account: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    /// CHECK: executing pool
-    pub executing_pool: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    /// CHECK: computation account
-    pub computation_account: UncheckedAccount<'info>,
-
-    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
-
-    #[account(mut)]
-    pub cluster_account: Box<Account<'info, Cluster>>,
-
-    #[account(mut)]
-    pub pool_account: Box<Account<'info, FeePool>>,
-
-    #[account(mut)]
-    pub clock_account: Box<Account<'info, ClockAccount>>,
-
-    pub system_program: Program<'info, System>,
-
-    pub arcium_program: Program<'info, Arcium>,
-
-    // Custom protocol accounts
-    pub market_group: Box<Account<'info, MarketGroup>>,
-
-    #[account(mut)]
-    pub pool: Box<Account<'info, Pool>>,
-
-    #[account(mut)]
-    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
-}
-
-//  SETTLEMENT CALLBACK ACCOUNTS
-
-#[callback_accounts("settle_yesno")]
-#[derive(Accounts)]
-pub struct SettleYesnoCallback<'info> {
-    pub arcium_program: Program<'info, Arcium>,
-
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_YESNO))]
-    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
-
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-
-    /// CHECK: computation account, checked by arcium
-    pub computation_account: UncheckedAccount<'info>,
-
-    #[account(address = derive_cluster_pda!(mxe_account))]
-    pub cluster_account: Box<Account<'info, Cluster>>,
-
-    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
-    /// CHECK: instructions sysvar
-    pub instructions_sysvar: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
-
-    #[account(mut)]
-    pub pool: Box<Account<'info, Pool>>,
-
-    #[account(mut)]
-    pub market: Box<Account<'info, Market>>,
+    pub pool: Account<'info, Pool>,
 
     #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
-    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub pool_vault: Account<'info, TokenAccount>,
 
     /// CHECK: PDA — pool vault authority
     #[account(seeds = [b"vault_authority", pool.key().as_ref()], bump = pool.vault_authority_bump)]
     pub vault_authority: UncheckedAccount<'info>,
 
-    #[account(mut)]
-    pub creator_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(mut, constraint = settlement_registry.pool == pool.key())]
+    pub settlement_registry: Account<'info, SettlementRegistry>,
 
     #[account(mut)]
-    pub treasury: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub creator_token_account: Account<'info, TokenAccount>,
 
-    pub token_program: Program<'info, Token>,
-}
+    #[account(mut, constraint = treasury.key() == cypher_market.treasury)]
+    pub treasury: Account<'info, TokenAccount>,
 
-#[callback_accounts("settle_multioutcome")]
-#[derive(Accounts)]
-pub struct SettleMultioutcomeCallback<'info> {
-    pub arcium_program: Program<'info, Arcium>,
+    /// CHECK: Arcium cluster — used by verify_output
+    #[account(seeds = [ARCIUM_CLUSTER_SEED], seeds::program = arcium_program.key(), bump)]
+    pub cluster_account: UncheckedAccount<'info>,
 
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MULTIOUTCOME))]
-    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
-
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-
-    /// CHECK: computation account, checked by arcium
+    /// CHECK: Computation account — used by verify_output
     pub computation_account: UncheckedAccount<'info>,
 
-    #[account(address = derive_cluster_pda!(mxe_account))]
-    pub cluster_account: Box<Account<'info, Cluster>>,
-
-    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
-    /// CHECK: instructions sysvar
-    pub instructions_sysvar: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
-
-    #[account(mut)]
-    pub pool: Box<Account<'info, Pool>>,
-
-    #[account(mut)]
-    pub market: Box<Account<'info, Market>>,
-
-    #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
-    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
-
-    /// CHECK: PDA — pool vault authority
-    #[account(seeds = [b"vault_authority", pool.key().as_ref()], bump = pool.vault_authority_bump)]
-    pub vault_authority: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    pub creator_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
-
-    #[account(mut)]
-    pub treasury: Box<InterfaceAccount<'info, TokenAccount>>,
-
+    pub arcium_program: Program<'info, ArciumProgram>,
     pub token_program: Program<'info, Token>,
 }
-
-#[callback_accounts("settle_accuracy")]
-#[derive(Accounts)]
-pub struct SettleAccuracyCallback<'info> {
-    pub arcium_program: Program<'info, Arcium>,
-
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_ACCURACY))]
-    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
-
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-
-    /// CHECK: computation account, checked by arcium
-    pub computation_account: UncheckedAccount<'info>,
-
-    #[account(address = derive_cluster_pda!(mxe_account))]
-    pub cluster_account: Box<Account<'info, Cluster>>,
-
-    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
-    /// CHECK: instructions sysvar
-    pub instructions_sysvar: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
-
-    #[account(mut)]
-    pub pool: Box<Account<'info, Pool>>,
-}
-
-// ─── SETTLEMENT POST-PROCESS ACCOUNTS ─────────────────────────────────────
 
 #[derive(Accounts)]
 pub struct AccuracySendFees<'info> {
@@ -2030,25 +1783,21 @@ pub struct AccuracySendFees<'info> {
     pub pool: Account<'info, Pool>,
 
     #[account(
-        mut,
-        seeds = [b"vault", pool.key().as_ref()],
-        bump,
-    )]
-    pub pool_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+mut,
+constraint = settlement_registry.pool == pool.key(),
+constraint = settlement_registry.status == RegistryStatus::Finalizing @ CypherError::RegistryNotFinalizing,
+)]
+    pub settlement_registry: Account<'info, SettlementRegistry>,
+
+    #[account(mut, seeds = [b"vault", pool.key().as_ref()], bump)]
+    pub pool_vault: Account<'info, TokenAccount>,
 
     /// CHECK: PDA — pool vault authority
     #[account(seeds = [b"vault_authority", pool.key().as_ref()], bump = pool.vault_authority_bump)]
     pub vault_authority: UncheckedAccount<'info>,
 
-    #[account(
-        mut,
-        constraint = settlement_registry.pool == pool.key(),
-        constraint = settlement_registry.status == RegistryStatus::Finalizing @ CypherError::RegistryNotFinalizing,
-    )]
-    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
-
     #[account(mut, constraint = treasury.key() == cypher_market.treasury)]
-    pub treasury: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub treasury: Account<'info, TokenAccount>,
 
     pub backend: Signer<'info>,
 
@@ -2058,18 +1807,18 @@ pub struct AccuracySendFees<'info> {
 #[derive(Accounts)]
 pub struct WritePositionPayout<'info> {
     #[account(
-        constraint = settlement_registry.status == RegistryStatus::Finalizing
-        || settlement_registry.status == RegistryStatus::Complete
-        @ CypherError::RegistryNotFinalizing,
-    )]
-    pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
+constraint = settlement_registry.status == RegistryStatus::Finalizing
+|| settlement_registry.status == RegistryStatus::Complete
+@ CypherError::RegistryNotFinalizing,
+)]
+    pub settlement_registry: Account<'info, SettlementRegistry>,
 
     #[account(
-        mut,
-        constraint = position.pool == settlement_registry.pool,
-        constraint = position.status == PositionStatus::Open @ CypherError::PayoutAlreadyWritten,
-    )]
-    pub position: Box<Account<'info, Position>>,
+mut,
+constraint = position.pool == settlement_registry.pool,
+constraint = position.status == PositionStatus::Open @ CypherError::PayoutAlreadyWritten,
+)]
+    pub position: Account<'info, Position>,
 
     pub backend: Signer<'info>,
 }
