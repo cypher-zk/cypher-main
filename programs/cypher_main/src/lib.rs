@@ -4,7 +4,6 @@ use anchor_spl::{
     token_interface::{Mint, TokenAccount},
 };
 use arcium_anchor::prelude::*;
-use arcium_client::idl::arcium::types::{CallbackAccount, CallbackInstruction};
 
 pub mod states;
 use states::*;
@@ -928,7 +927,7 @@ pub mod cypher_main {
             Err(_) => return err!(CypherError::InvalidZkProof),
         };
 
-        let winner_mask: [u8; 8] = typed_output.winner_mask;
+        let enc = typed_output.field_0;
 
         let registry_key = ctx.accounts.settlement_registry.key();
         let pool_key = ctx.accounts.pool.key();
@@ -950,7 +949,9 @@ pub mod cypher_main {
             shard_index,
             settled_shards: registry.settled_shards,
             total_shards: registry.total_shards,
-            winner_mask: winner_mask.to_vec(),
+            encryption_key: enc.encryption_key,
+            nonce: enc.nonce,
+            ciphertext: enc.ciphertexts[0],
             settled_at: now,
         });
 
@@ -987,7 +988,7 @@ pub mod cypher_main {
             Err(_) => return err!(CypherError::InvalidZkProof),
         };
 
-        let winner_mask: [u8; 8] = typed_output.winner_mask;
+        let enc = typed_output.field_0;
 
         let registry_key = ctx.accounts.settlement_registry.key();
         let pool_key = ctx.accounts.pool.key();
@@ -1009,7 +1010,9 @@ pub mod cypher_main {
             shard_index,
             settled_shards: registry.settled_shards,
             total_shards: registry.total_shards,
-            winner_mask: winner_mask.to_vec(),
+            encryption_key: enc.encryption_key,
+            nonce: enc.nonce,
+            ciphertext: enc.ciphertexts[0],
             settled_at: now,
         });
 
@@ -1046,11 +1049,7 @@ pub mod cypher_main {
             Err(_) => return err!(CypherError::InvalidZkProof),
         };
 
-        let errors: [u64; 4] = typed_output.errors;
-        let mut error_bytes = Vec::with_capacity(32);
-        for e in errors.iter() {
-            error_bytes.extend_from_slice(&e.to_le_bytes());
-        }
+        let enc = typed_output.field_0;
 
         let registry_key = ctx.accounts.settlement_registry.key();
         let pool_key = ctx.accounts.pool.key();
@@ -1072,7 +1071,9 @@ pub mod cypher_main {
             shard_index,
             settled_shards: registry.settled_shards,
             total_shards: registry.total_shards,
-            winner_mask: error_bytes,
+            encryption_key: enc.encryption_key,
+            nonce: enc.nonce,
+            ciphertext: enc.ciphertexts[0],
             settled_at: now,
         });
 
@@ -1755,50 +1756,26 @@ pub struct QueueSettlementAccuracy<'info> {
     pub settlement_registry: Box<Account<'info, SettlementRegistry>>,
 }
 
-// OUTPUT TYPES (plain Rust, not encrypted — Arcium network decrypts for callbacks)
-
-#[derive(AnchorSerialize, AnchorDeserialize)]
-pub struct SettleYesnoOutput {
-    pub winner_mask: [u8; 8],
-}
-
-impl HasSize for SettleYesnoOutput {
-    const SIZE: usize = 8;
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize)]
-pub struct SettleMultioutcomeOutput {
-    pub winner_mask: [u8; 8],
-}
-
-impl HasSize for SettleMultioutcomeOutput {
-    const SIZE: usize = 8;
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize)]
-pub struct SettleAccuracyOutput {
-    pub errors: [u64; 4],
-}
-
-impl HasSize for SettleAccuracyOutput {
-    const SIZE: usize = 32;
-}
-
 //  SETTLEMENT CALLBACK ACCOUNTS
 
+#[callback_accounts("settle_yesno")]
 #[derive(Accounts)]
 pub struct SettleYesnoCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
 
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_YESNO))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
 
+    #[account(address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
 
-    /// CHECK: computation account
+    /// CHECK: computation account, checked by arcium
     pub computation_account: UncheckedAccount<'info>,
 
+    #[account(address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
 
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: instructions sysvar
     pub instructions_sysvar: UncheckedAccount<'info>,
 
@@ -1809,60 +1786,24 @@ pub struct SettleYesnoCallback<'info> {
     pub pool: Box<Account<'info, Pool>>,
 }
 
-impl CallbackCompAccs for SettleYesnoCallback<'_> {
-    fn callback_ix(
-        computation_offset: u64,
-        mxe_account: &MXEAccount,
-        extra_accs: &[CallbackAccount],
-    ) -> Result<CallbackInstruction> {
-        let mut accounts = Vec::with_capacity(extra_accs.len() + 6);
-        accounts.push(CallbackAccount {
-            pubkey: ARCIUM_PROG_ID,
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_YESNO),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_mxe_pda!(),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_comp_pda!(computation_offset, mxe_account),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_cluster_pda!(mxe_account),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: INSTRUCTIONS_SYSVAR_ID,
-            is_writable: false,
-        });
-        accounts.extend_from_slice(extra_accs);
-
-        Ok(CallbackInstruction {
-            program_id: crate::ID,
-            discriminator: crate::instruction::SettleYesnoCallback::DISCRIMINATOR.to_vec(),
-            accounts,
-        })
-    }
-}
-
+#[callback_accounts("settle_multioutcome")]
 #[derive(Accounts)]
 pub struct SettleMultioutcomeCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
 
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_MULTIOUTCOME))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
 
+    #[account(address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
 
-    /// CHECK: computation account
+    /// CHECK: computation account, checked by arcium
     pub computation_account: UncheckedAccount<'info>,
 
+    #[account(address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
 
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: instructions sysvar
     pub instructions_sysvar: UncheckedAccount<'info>,
 
@@ -1873,60 +1814,24 @@ pub struct SettleMultioutcomeCallback<'info> {
     pub pool: Box<Account<'info, Pool>>,
 }
 
-impl CallbackCompAccs for SettleMultioutcomeCallback<'_> {
-    fn callback_ix(
-        computation_offset: u64,
-        mxe_account: &MXEAccount,
-        extra_accs: &[CallbackAccount],
-    ) -> Result<CallbackInstruction> {
-        let mut accounts = Vec::with_capacity(extra_accs.len() + 6);
-        accounts.push(CallbackAccount {
-            pubkey: ARCIUM_PROG_ID,
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_MULTIOUTCOME),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_mxe_pda!(),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_comp_pda!(computation_offset, mxe_account),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_cluster_pda!(mxe_account),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: INSTRUCTIONS_SYSVAR_ID,
-            is_writable: false,
-        });
-        accounts.extend_from_slice(extra_accs);
-
-        Ok(CallbackInstruction {
-            program_id: crate::ID,
-            discriminator: crate::instruction::SettleMultioutcomeCallback::DISCRIMINATOR.to_vec(),
-            accounts,
-        })
-    }
-}
-
+#[callback_accounts("settle_accuracy")]
 #[derive(Accounts)]
 pub struct SettleAccuracyCallback<'info> {
     pub arcium_program: Program<'info, Arcium>,
 
+    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_ACCURACY))]
     pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
 
+    #[account(address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
 
-    /// CHECK: computation account
+    /// CHECK: computation account, checked by arcium
     pub computation_account: UncheckedAccount<'info>,
 
+    #[account(address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
 
+    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
     /// CHECK: instructions sysvar
     pub instructions_sysvar: UncheckedAccount<'info>,
 
@@ -1935,45 +1840,4 @@ pub struct SettleAccuracyCallback<'info> {
 
     #[account(mut)]
     pub pool: Box<Account<'info, Pool>>,
-}
-
-impl CallbackCompAccs for SettleAccuracyCallback<'_> {
-    fn callback_ix(
-        computation_offset: u64,
-        mxe_account: &MXEAccount,
-        extra_accs: &[CallbackAccount],
-    ) -> Result<CallbackInstruction> {
-        let mut accounts = Vec::with_capacity(extra_accs.len() + 6);
-        accounts.push(CallbackAccount {
-            pubkey: ARCIUM_PROG_ID,
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_comp_def_pda!(COMP_DEF_OFFSET_ACCURACY),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_mxe_pda!(),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_comp_pda!(computation_offset, mxe_account),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: derive_cluster_pda!(mxe_account),
-            is_writable: false,
-        });
-        accounts.push(CallbackAccount {
-            pubkey: INSTRUCTIONS_SYSVAR_ID,
-            is_writable: false,
-        });
-        accounts.extend_from_slice(extra_accs);
-
-        Ok(CallbackInstruction {
-            program_id: crate::ID,
-            discriminator: crate::instruction::SettleAccuracyCallback::DISCRIMINATOR.to_vec(),
-            accounts,
-        })
-    }
 }
