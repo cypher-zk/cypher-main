@@ -8,6 +8,7 @@ import "./suites/create_market_group.test";
 import "./suites/create_flat_market.test";
 import "./suites/create_tier_market.test";
 import "./suites/create_pool.test";
+import "./suites/cancel_market.test";
 // Uncomment as suites are written:
 // import "./suites/create_tier_market.test";
 // import "./suites/place_bet.test";
