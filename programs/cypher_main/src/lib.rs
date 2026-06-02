@@ -589,6 +589,57 @@ pub mod cypher_main {
         });
         Ok(())
     }
+
+    pub fn slash_bond(ctx: Context<SlashBond>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            ctx.accounts.bond.status == BondStatus::Locked,
+            CypherError::BondNotLocked
+        );
+        require!(
+            ctx.accounts.market_group.is_locked(),
+            CypherError::MarketNotLocked
+        );
+        require!(
+            now > ctx.accounts.market_group.resolve_deadline,
+            CypherError::ResolveDeadlineNotPassed
+        );
+
+        let bond_key = ctx.accounts.bond.key();
+        let group_key = ctx.accounts.market_group.key();
+        let creator_key = ctx.accounts.market_group.creator;
+
+        let authority_seeds = &[
+            b"bond_vault_authority",
+            bond_key.as_ref(),
+            &[ctx.accounts.bond.vault_authority_bump],
+        ];
+
+        anchor_spl::token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.key(),
+                anchor_spl::token::Transfer {
+                    from: ctx.accounts.bond_vault.to_account_info(),
+                    to: ctx.accounts.treasury.to_account_info(),
+                    authority: ctx.accounts.bond_vault_authority.to_account_info(),
+                },
+                &[authority_seeds],
+            ),
+            BOND_AMOUNT,
+        )?;
+
+        ctx.accounts.bond.status = BondStatus::Slashed;
+        ctx.accounts.market_group.status = GroupStatus::Voided;
+
+        emit!(BondSlashed {
+            bond: bond_key,
+            group: group_key,
+            creator: creator_key,
+            amount: BOND_AMOUNT,
+            slashed_at: now,
+        });
+        Ok(())
+    }
 }
 
 // All account instruction below
@@ -958,6 +1009,31 @@ pub struct ReturnBond<'info> {
     pub creator_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub creator: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct SlashBond<'info> {
+    #[account(mut, constraint = market_group.is_locked() @ CypherError::MarketNotLocked)]
+    pub market_group: Account<'info, MarketGroup>,
+
+    #[account(
+        mut,
+        constraint = bond.group == market_group.key(),
+        constraint = bond.status == BondStatus::Locked @ CypherError::BondNotLocked,
+    )]
+    pub bond: Account<'info, Bond>,
+
+    #[account(mut, seeds = [b"bond_vault", bond.key().as_ref()], bump)]
+    pub bond_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// CHECK: PDA — bond vault authority
+    #[account(seeds = [b"bond_vault_authority", bond.key().as_ref()], bump = bond.vault_authority_bump)]
+    pub bond_vault_authority: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub treasury: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
 }
