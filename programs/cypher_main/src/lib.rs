@@ -638,13 +638,22 @@ pub mod cypher {
         ctx.accounts.position.claimed = true;
 
         if is_winner && payout_amount > 0 {
-            vault_transfer(
-                ctx.accounts.token_program.key(),
-                ctx.accounts.market_vault.to_account_info(),
-                ctx.accounts.user_token_account.to_account_info(),
-                ctx.accounts.market_vault.to_account_info(),
-                &ctx.accounts.market.key(),
-                ctx.accounts.market.vault_bump,
+            let market_key = ctx.accounts.market.key();
+            let seeds: &[&[u8]] = &[
+                b"market_vault",
+                market_key.as_ref(),
+                &[ctx.accounts.market.vault_bump],
+            ];
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.key(),
+                    Transfer {
+                        from: ctx.accounts.market_vault.to_account_info(),
+                        to: ctx.accounts.user_token_account.to_account_info(),
+                        authority: ctx.accounts.market_vault.to_account_info(),
+                    },
+                    &[seeds],
+                ),
                 payout_amount,
             )?;
             ctx.accounts.market.total_payouts_claimed = ctx
@@ -728,13 +737,22 @@ pub mod cypher {
         ctx.accounts.position.claimed = true;
 
         if refund_amount > 0 {
-            vault_transfer(
-                ctx.accounts.token_program.key(),
-                ctx.accounts.market_vault.to_account_info(),
-                ctx.accounts.user_token_account.to_account_info(),
-                ctx.accounts.market_vault.to_account_info(),
-                &ctx.accounts.market.key(),
-                ctx.accounts.market.vault_bump,
+            let market_key = ctx.accounts.market.key();
+            let seeds: &[&[u8]] = &[
+                b"market_vault",
+                market_key.as_ref(),
+                &[ctx.accounts.market.vault_bump],
+            ];
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.key(),
+                    Transfer {
+                        from: ctx.accounts.market_vault.to_account_info(),
+                        to: ctx.accounts.user_token_account.to_account_info(),
+                        authority: ctx.accounts.market_vault.to_account_info(),
+                    },
+                    &[seeds],
+                ),
                 refund_amount,
             )?;
             ctx.accounts.market.total_refunds_claimed = ctx
@@ -752,32 +770,6 @@ pub mod cypher {
         }
         Ok(())
     }
-}
-
-// ── inline(never) helper to keep large token-CPI stack vars off the caller's frame ──
-#[inline(never)]
-fn vault_transfer<'info>(
-    token_program: Pubkey,
-    from: AccountInfo<'info>,
-    to: AccountInfo<'info>,
-    authority: AccountInfo<'info>,
-    vault_key: &Pubkey,
-    vault_bump: u8,
-    amount: u64,
-) -> Result<()> {
-    let seeds: &[&[u8]] = &[
-        b"market_vault",
-        vault_key.as_ref(),
-        &[vault_bump],
-    ];
-    token::transfer(
-        CpiContext::new_with_signer(
-            token_program,
-            Transfer { from, to, authority },
-            &[seeds],
-        ),
-        amount,
-    )
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -805,21 +797,21 @@ pub struct CreateMarket<'info> {
     pub creator: Signer<'info>,
 
     #[account(mut, seeds = [b"global_state"], bump = global_state.bump)]
-    pub global_state: Box<Account<'info, GlobalState>>,
+    pub global_state: Account<'info, GlobalState>,
 
     #[account(
         init, payer = creator, space = MARKET_SPACE,
         seeds = [b"market", global_state.market_counter.to_le_bytes().as_ref()],
         bump,
     )]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
 
     #[account(
         init, payer = creator, space = LP_POSITION_SPACE,
         seeds = [b"lp-position", market.key().as_ref(), creator.key().as_ref()],
         bump,
     )]
-    pub lp_position: Box<Account<'info, LPPosition>>,
+    pub lp_position: Account<'info, LPPosition>,
 
     #[account(
         init, payer = creator,
@@ -828,14 +820,14 @@ pub struct CreateMarket<'info> {
         seeds = [b"market_vault", market.key().as_ref()],
         bump,
     )]
-    pub market_vault: Box<Account<'info, TokenAccount>>,
+    pub market_vault: Account<'info, TokenAccount>,
 
     #[account(
         mut,
         constraint = creator_token_account.owner == creator.key(),
         constraint = creator_token_account.mint == global_state.accepted_mint @ CypherError::WrongMint,
     )]
-    pub creator_token_account: Box<Account<'info, TokenAccount>>,
+    pub creator_token_account: Account<'info, TokenAccount>,
 
     pub accepted_mint: InterfaceAccount<'info, Mint>,
     pub token_program: Program<'info, Token>,
@@ -848,13 +840,13 @@ pub struct CancelMarket<'info> {
     pub creator: Signer<'info>,
     #[account(mut, seeds = [b"market", market.market_id.to_le_bytes().as_ref()], bump = market.bump,
         constraint = market.creator == creator.key() @ CypherError::NotMarketCreator)]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
     #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
-    pub market_vault: Box<Account<'info, TokenAccount>>,
+    pub market_vault: Account<'info, TokenAccount>,
     #[account(mut, seeds = [b"lp-position", market.key().as_ref(), creator.key().as_ref()], bump = lp_position.bump)]
-    pub lp_position: Box<Account<'info, LPPosition>>,
+    pub lp_position: Account<'info, LPPosition>,
     #[account(mut, constraint = creator_token_account.owner == creator.key())]
-    pub creator_token_account: Box<Account<'info, TokenAccount>>,
+    pub creator_token_account: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
 }
 
@@ -921,13 +913,10 @@ pub struct InitRevealYesnoCompDef<'info> {
     #[account(mut, address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
     #[account(mut)]
-    /// CHECK: comp_def_account, checked by arcium program.
     pub comp_def_account: UncheckedAccount<'info>,
     #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
-    /// CHECK: address_lookup_table, checked by arcium program.
     pub address_lookup_table: UncheckedAccount<'info>,
     #[account(address = LUT_PROGRAM_ID)]
-    /// CHECK: lut_program is the Address Lookup Table program.
     pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
@@ -941,13 +930,10 @@ pub struct InitPayoutYesnoCompDef<'info> {
     #[account(mut, address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
     #[account(mut)]
-    /// CHECK: comp_def_account, checked by arcium program.
     pub comp_def_account: UncheckedAccount<'info>,
     #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
-    /// CHECK: address_lookup_table, checked by arcium program.
     pub address_lookup_table: UncheckedAccount<'info>,
     #[account(address = LUT_PROGRAM_ID)]
-    /// CHECK: lut_program is the Address Lookup Table program.
     pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
@@ -961,13 +947,10 @@ pub struct InitRefundYesnoCompDef<'info> {
     #[account(mut, address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
     #[account(mut)]
-    /// CHECK: comp_def_account, checked by arcium program.
     pub comp_def_account: UncheckedAccount<'info>,
     #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
-    /// CHECK: address_lookup_table, checked by arcium program.
     pub address_lookup_table: UncheckedAccount<'info>,
     #[account(address = LUT_PROGRAM_ID)]
-    /// CHECK: lut_program is the Address Lookup Table program.
     pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
@@ -980,6 +963,7 @@ pub struct InitRefundYesnoCompDef<'info> {
 
 #[queue_computation_accounts("place_private_bet_yesno", payer)]
 #[derive(Accounts)]
+#[instruction(computation_offset: u64)]
 pub struct PlacePrivateBetYesno<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
@@ -992,7 +976,7 @@ pub struct PlacePrivateBetYesno<'info> {
         bump,
         address = derive_sign_pda!(),
     )]
-    pub sign_pda_account: Box<Account<'info, ArciumSignerAccount>>,
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
 
     #[account(address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
@@ -1005,8 +989,8 @@ pub struct PlacePrivateBetYesno<'info> {
     /// CHECK: executing_pool, checked by the arcium program.
     pub executing_pool: UncheckedAccount<'info>,
 
-    #[account(mut)]
-    /// CHECK: computation_account, verified manually in the function body.
+    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
+    /// CHECK: computation_account, checked by the arcium program.
     pub computation_account: UncheckedAccount<'info>,
 
     #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_PLACE_BET_YESNO))]
@@ -1016,10 +1000,10 @@ pub struct PlacePrivateBetYesno<'info> {
     pub cluster_account: Box<Account<'info, Cluster>>,
 
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
-    pub pool_account: Box<Account<'info, FeePool>>,
+    pub pool_account: Account<'info, FeePool>,
 
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
-    pub clock_account: Box<Account<'info, ClockAccount>>,
+    pub clock_account: Account<'info, ClockAccount>,
 
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
@@ -1028,35 +1012,34 @@ pub struct PlacePrivateBetYesno<'info> {
     pub user: Signer<'info>,
 
     #[account(seeds = [b"global_state"], bump = global_state.bump)]
-    pub global_state: Box<Account<'info, GlobalState>>,
+    pub global_state: Account<'info, GlobalState>,
 
     #[account(
         mut,
         seeds = [b"market", market.market_id.to_le_bytes().as_ref()],
         bump = market.bump,
     )]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
 
     #[account(
         mut,
         seeds = [b"lp-position", market.key().as_ref(), market.creator.as_ref()],
         bump = lp_position.bump,
     )]
-    pub lp_position: Box<Account<'info, LPPosition>>,
+    pub lp_position: Account<'info, LPPosition>,
 
     #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
-    pub market_vault: Box<Account<'info, TokenAccount>>,
+    pub market_vault: Account<'info, TokenAccount>,
 
     #[account(
         mut,
         constraint = user_token_account.owner == user.key(),
         constraint = user_token_account.mint == global_state.accepted_mint @ CypherError::WrongMint,
     )]
-    pub user_token_account: Box<Account<'info, TokenAccount>>,
+    pub user_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: protocol treasury, checked by constraint
-    #[account(mut)]
-    pub protocol_treasury: UncheckedAccount<'info>,
+    #[account(mut, constraint = protocol_treasury.key() == global_state.protocol_treasury)]
+    pub protocol_treasury: Account<'info, TokenAccount>,
 
     // ── EncryptedPosition: INIT HERE (not in callback) ────────────────────
     #[account(
@@ -1066,7 +1049,7 @@ pub struct PlacePrivateBetYesno<'info> {
         seeds = [b"position", market.key().as_ref(), user.key().as_ref()],
         bump,
     )]
-    pub position: Box<Account<'info, EncryptedPosition>>,
+    pub position: Account<'info, EncryptedPosition>,
 
     pub token_program: Program<'info, Token>,
 }
@@ -1097,10 +1080,10 @@ pub struct PlacePrivateBetYesnoCallback<'info> {
 
     // Custom — both already exist, just update them
     #[account(mut)]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
 
     #[account(mut)]
-    pub position: Box<Account<'info, EncryptedPosition>>,
+    pub position: Account<'info, EncryptedPosition>,
 }
 
 // ── ResolveMarketYesno ────────────────────────────────────────────────────────
@@ -1112,7 +1095,7 @@ pub struct ResolveMarketYesno<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
-    pub sign_pda_account: Box<Account<'info, ArciumSignerAccount>>,
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
     #[account(address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
     #[account(mut, address = derive_mempool_pda!(mxe_account))]
@@ -1129,9 +1112,9 @@ pub struct ResolveMarketYesno<'info> {
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
-    pub pool_account: Box<Account<'info, FeePool>>,
+    pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
-    pub clock_account: Box<Account<'info, ClockAccount>>,
+    pub clock_account: Account<'info, ClockAccount>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
     // Custom
@@ -1141,7 +1124,7 @@ pub struct ResolveMarketYesno<'info> {
         bump = market.bump,
         constraint = market.resolver == resolver.key() @ CypherError::UnauthorizedResolver,
     )]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
 }
 
 #[callback_accounts("reveal_market_outcome_yesno")]
@@ -1152,12 +1135,12 @@ pub struct RevealMarketOutcomeYesnoCallback<'info> {
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())]
     pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: computation_account, checked by arcium program via constraints in the callback context.
+    /// CHECK: pub computation_account: UncheckedAccount<'info>,
     pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Account<'info, Cluster>,
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
-    /// CHECK: instructions_sysvar, checked by the account constraint
+    /// CHECK:
     pub instructions_sysvar: UncheckedAccount<'info>,
     // Custom
     #[account(mut)]
@@ -1173,7 +1156,7 @@ pub struct ClaimPayoutYesno<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
-    pub sign_pda_account: Box<Account<'info, ArciumSignerAccount>>,
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
     #[account(address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
     #[account(mut, address = derive_mempool_pda!(mxe_account))]
@@ -1190,21 +1173,21 @@ pub struct ClaimPayoutYesno<'info> {
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
-    pub pool_account: Box<Account<'info, FeePool>>,
+    pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
-    pub clock_account: Box<Account<'info, ClockAccount>>,
+    pub clock_account: Account<'info, ClockAccount>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
     // Custom
     pub user: Signer<'info>,
     #[account(seeds = [b"market", market.market_id.to_le_bytes().as_ref()], bump = market.bump)]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
     #[account(mut,
         seeds = [b"position", market.key().as_ref(), user.key().as_ref()],
         bump = position.bump,
         constraint = position.user == user.key(),
     )]
-    pub position: Box<Account<'info, EncryptedPosition>>,
+    pub position: Account<'info, EncryptedPosition>,
 }
 
 #[callback_accounts("compute_yesno_payout")]
@@ -1215,25 +1198,25 @@ pub struct ComputeYesnoPayoutCallback<'info> {
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())]
     pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: computation_account, checked by arcium program via constraints in the callback context.
+    /// CHECK: pub computation_account: UncheckedAccount<'info>,
     pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Account<'info, Cluster>,
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
-    /// CHECK: instructions_sysvar, checked by the account constraint
+    /// CHECK:
     pub instructions_sysvar: UncheckedAccount<'info>,
     // Custom — callback directly transfers USDC to winner
     #[account(mut)]
-    pub position: Box<Account<'info, EncryptedPosition>>,
+    pub position: Account<'info, EncryptedPosition>,
     /// CHECK: user wallet receiving payout
     #[account(mut)]
     pub user: UncheckedAccount<'info>,
     #[account(mut)]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
     #[account(mut)]
-    pub market_vault: Box<Account<'info, TokenAccount>>,
+    pub market_vault: Account<'info, TokenAccount>,
     #[account(mut)]
-    pub user_token_account: Box<Account<'info, TokenAccount>>,
+    pub user_token_account: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
@@ -1247,7 +1230,7 @@ pub struct ClaimRefundYesno<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(init_if_needed, space = 9, payer = payer, seeds = [&SIGN_PDA_SEED], bump, address = derive_sign_pda!())]
-    pub sign_pda_account: Box<Account<'info, ArciumSignerAccount>>,
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
     #[account(address = derive_mxe_pda!())]
     pub mxe_account: Box<Account<'info, MXEAccount>>,
     #[account(mut, address = derive_mempool_pda!(mxe_account))]
@@ -1264,21 +1247,21 @@ pub struct ClaimRefundYesno<'info> {
     #[account(mut, address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Box<Account<'info, Cluster>>,
     #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
-    pub pool_account: Box<Account<'info, FeePool>>,
+    pub pool_account: Account<'info, FeePool>,
     #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
-    pub clock_account: Box<Account<'info, ClockAccount>>,
+    pub clock_account: Account<'info, ClockAccount>,
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
     // Custom
     pub user: Signer<'info>,
     #[account(seeds = [b"market", market.market_id.to_le_bytes().as_ref()], bump = market.bump)]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
     #[account(mut,
         seeds = [b"position", market.key().as_ref(), user.key().as_ref()],
         bump = position.bump,
         constraint = position.user == user.key(),
     )]
-    pub position: Box<Account<'info, EncryptedPosition>>,
+    pub position: Account<'info, EncryptedPosition>,
 }
 
 #[callback_accounts("compute_yesno_refund")]
@@ -1289,25 +1272,25 @@ pub struct ComputeYesnoRefundCallback<'info> {
     pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
     #[account(address = derive_mxe_pda!())]
     pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: computation_account, checked by arcium program via constraints in the callback context.
+    /// CHECK: pub computation_account: UncheckedAccount<'info>,
     pub computation_account: UncheckedAccount<'info>,
     #[account(address = derive_cluster_pda!(mxe_account))]
     pub cluster_account: Account<'info, Cluster>,
     #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
-    /// CHECK: instructions_sysvar, checked by the account constraint
+    /// CHECK:
     pub instructions_sysvar: UncheckedAccount<'info>,
     // Custom — direct refund transfer
     #[account(mut)]
-    pub position: Box<Account<'info, EncryptedPosition>>,
+    pub position: Account<'info, EncryptedPosition>,
     /// CHECK: user wallet
     #[account(mut)]
     pub user: UncheckedAccount<'info>,
     #[account(mut)]
-    pub market: Box<Account<'info, Market>>,
+    pub market: Account<'info, Market>,
     #[account(mut)]
-    pub market_vault: Box<Account<'info, TokenAccount>>,
+    pub market_vault: Account<'info, TokenAccount>,
     #[account(mut)]
-    pub user_token_account: Box<Account<'info, TokenAccount>>,
+    pub user_token_account: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
