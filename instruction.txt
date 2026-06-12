@@ -1,0 +1,147 @@
+Cypher — Confidential Prediction Market Protocol
+===================================================
+
+A Solana program built with Anchor + Arcium for encrypted predictions.
+Users place encrypted bets, Arcium circuits compute settlement without
+revealing individual predictions, and winners claim payouts in USDC.
+
+Protocol Account Hierarchy
+--------------------------
+  CyperMarket (1 global PDA)
+   └── MarketGroup (1 per question)
+        ├── Bond + BondVault (creator's $10 bond)
+        ├── Market (1 for YesNo/Multi, 3 for Accuracy tiers)
+        │    └── Pool + PoolVault (holds user stakes)
+        │         ├── Position PDAs (1 per user per pool)
+        │         └── SettlementRegistry (1 per pool)
+        └── BondVault
+
+
+INSTRUCTIONS (step by step)
+===========================
+
+1. INITIALIZE (initialize)
+   - Admin creates the global CyperMarket PDA.
+   - Sets protocol_fee_bps, lp_fee_bps, accuracy_platform_fee_bps.
+   - Defines accepted USDC mint and treasury account.
+   - One-time setup before any markets can be created.
+
+2. REGISTER COMPUTATION DEFINITIONS (init_yesno_comp_def,
+   init_multioutcome_comp_def, init_accuracy_comp_def)
+   - Registers three Arcium circuits on-chain:
+     * settle_yesno       — compares encrypted side {0|1} vs resolved_side
+     * settle_multioutcome — compares encrypted outcome_index vs resolved_outcome
+     * settle_accuracy    — computes |prediction - oracle_value| for each slot
+   - Uploads .arcis circuit bytecode to Arcium cluster.
+   - Necessary once per deployment.
+
+3. CREATE MARKET GROUP (create_market_group)
+   - Creator pays $10 USDC bond (locked in BondVault).
+   - Creates a MarketGroup PDA with question, type (YesNo/Multi/Accuracy),
+     category, oracle type, lock/resolve timestamps.
+   - Emits GroupCreated event.
+
+4. CREATE MARKET (create_flat_market / create_tier_market)
+   - YesNo/Multi: one flat market per group (tier_byte=0).
+   - Accuracy: three tier markets (Micro/Standard/Whale at $1/$10/$100).
+
+5. CREATE POOL (create_pool)
+   - Creates a Pool + PoolVault (SPL USDC token account) under a market.
+   - YesNo/Multi: one unified pool per market.
+   - Accuracy: one pool per tier (Micro/Standard/Whale).
+
+6. PLACE BET (place_bet / place_bet_accuracy)
+   - User submits an Arcium-encrypted prediction:
+     * YesNo:        encrypt({ side: 0|1 })
+     * MultiOutcome: encrypt({ outcome_index: 0-3 })
+     * Accuracy:     encrypt({ value: u64 })
+   - Transfers stake from user → pool vault.
+   - Creates a Position PDA with encrypted payload.
+   - Emits BetPlaced event (stake public, prediction stays encrypted).
+
+7. LOCK MARKET (lock_market)
+   - Called after lock_timestamp passes.
+   - Transitions market_group status from Open → Locked.
+   - No more bets accepted. Oracle can now post resolution.
+
+8. POST RESOLUTION (post_resolution)
+   - Oracle authority (Pyth/Switchboard backend or creator for manual)
+     posts the resolved value.
+   - Starts a 1-hour (3600s) dispute window.
+   - Transitions group: Locked → Resolving.
+
+9. INIT SETTLEMENT REGISTRY (init_settlement_registry)
+   - Backend calls after dispute window ends.
+   - Creates SettlementRegistry PDA tracking shard progress.
+   - Calculates total_shards = ceil(participant_count / shard_size).
+   - Marks pool → Settling, group → Settling.
+
+10. QUEUE SETTLEMENT (queue_settlement_yesno / _multioutcome / _accuracy)
+    - Backend queues Arcium computation jobs (one per shard).
+    - Each shard batch: up to 8 positions (YesNo/Multi) or 4 (Accuracy).
+    - Submits resolved value + encrypted positions + shard count to circuit.
+    - Each queue includes a callback instruction (settle_*_callback) that
+      the Arcium cluster executes after computation completes.
+
+11. SETTLEMENT CALLBACK (settle_yesno_callback / _multioutcome_callback /
+    settle_accuracy_callback)
+    - Called by Arcium cluster after computation.
+    - Verifies ZK proof (validates circuit correctness).
+    - For YesNo/Multi: circuit outputs winner_mask [u8; 8].
+    - For Accuracy: circuit outputs errors [u64; 4].
+    - Sends protocol fees → treasury, LP fees → creator via
+      send_settlement_fees() helper.
+    - Increments settled_shards counter.
+    - Emits ShardSettled with encrypted output (decrypted off-chain).
+    - When all shards done: marks Registry → Finalizing, Pool → Settled.
+    - Emits RegistryFinalized event.
+
+12. ACCURACY SEND FEES (accuracy_send_fees)
+    - After all shards settle for Accuracy markets.
+    - Computes platform_fee = loser_count * bet_size * fee_bps / 10000.
+    - Transfers platform fee from pool_vault → treasury.
+
+13. WRITE POSITION PAYOUT (write_position_payout)
+    - Backend or payout writer deciphers ShardSettled events off-chain
+      to determine winner/loser for each position.
+    - Calls this instruction for each position to set payout amount.
+    - Transitions position: Open → Settled.
+    - Emits PayoutWritten event.
+
+14. CLAIM PAYOUT (claim_payout)
+    - User claims their payout after write_position_payout.
+    - Transfers payout amount from pool_vault → user's token account.
+    - Transitions position: Settled → Claimed.
+    - Emits PayoutClaimed event.
+
+15. RETURN BOND (return_bond)
+    - Creator calls after group reaches Settled status.
+    - Returns their $10 USDC bond from bond_vault → creator wallet.
+    - Marks bond → Returned.
+
+16. SLASH BOND (slash_bond)
+    - Anyone can call if creator misses resolve_deadline.
+    - Bond is sent to treasury instead of creator.
+    - MarketGroup marked Voided.
+
+17. CANCEL MARKET (cancel_market)
+    - Creator cancels a market before any bets placed.
+    - Requires pool.participant_count == 0.
+    - Transfers bond back to creator.
+    - Marks bond → Returned, group → Voided.
+
+
+LEGEND — Summary of Lifecycle
+------------------------------
+
+MarketGroup:  Open → Locked → Resolving → Settling → Settled
+              Open → Voided  (cancel before bets)
+
+Pool:         Open → Settling → Settled
+
+Position:     Open → Settled → Claimed
+
+Bond:         Locked → Returned  (via return_bond)
+              Locked → Slashed   (via slash_bond)
+
+Registry:     InProgress → Finalizing → Complete
