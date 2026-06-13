@@ -1757,7 +1757,14 @@ pub struct InitMarketPoolsYesno<'info> {
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
     // Custom
-    #[account(mut, seeds = [b"market", market.market_id.to_le_bytes().as_ref()], bump = market.bump)]
+    #[account(
+        mut,
+        seeds = [b"market", market.market_id.to_le_bytes().as_ref()],
+        bump = market.bump,
+        constraint = market.creator == payer.key() @ CypherError::NotMarketCreator,
+        constraint = market.market_type == MARKET_TYPE_YESNO @ CypherError::WrongMarketType,
+        constraint = market.total_bets_count == 0 && market.mxe_nonce == 0 @ CypherError::MarketAlreadyInitialized,
+    )]
     pub market: Box<Account<'info, Market>>,
 }
 
@@ -1817,7 +1824,14 @@ pub struct InitMarketPoolsMulti<'info> {
     pub system_program: Program<'info, System>,
     pub arcium_program: Program<'info, Arcium>,
     // Custom
-    #[account(mut, seeds = [b"market", market.market_id.to_le_bytes().as_ref()], bump = market.bump)]
+    #[account(
+        mut,
+        seeds = [b"market", market.market_id.to_le_bytes().as_ref()],
+        bump = market.bump,
+        constraint = market.creator == payer.key() @ CypherError::NotMarketCreator,
+        constraint = market.market_type == MARKET_TYPE_MULTIOUTCOME @ CypherError::WrongMarketType,
+        constraint = market.total_bets_count == 0 && market.mxe_nonce == 0 @ CypherError::MarketAlreadyInitialized,
+    )]
     pub market: Box<Account<'info, Market>>,
 }
 

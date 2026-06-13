@@ -362,4 +362,6 @@ pub enum CypherError {
     WrongMint,
     #[msg("Invalid category — must be 0-6")]
     InvalidCategory,
+    #[msg("Market pools already initialized — cannot call init twice")]
+    MarketAlreadyInitialized,
 }
