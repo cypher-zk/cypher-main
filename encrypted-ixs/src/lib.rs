@@ -304,7 +304,7 @@ mod circuits {
 
     #[instruction]
     pub fn compute_multi_payout(
-        position_data: Enc<Mxe, BetInput>,
+        position_data: Enc<Shared, BetInput>,
         outcome: u8,
         payout_ratio: u64,
     ) -> (u64, bool) {
@@ -322,7 +322,7 @@ mod circuits {
     //  Identical to yesno refund — just decrypt and return amount.
 
     #[instruction]
-    pub fn compute_multi_refund(position_data: Enc<Mxe, BetInput>) -> u64 {
+    pub fn compute_multi_refund(position_data: Enc<Shared, BetInput>) -> u64 {
         let pos = position_data.to_arcis();
         pos.amount.reveal()
     }

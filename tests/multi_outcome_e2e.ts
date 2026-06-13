@@ -491,8 +491,8 @@ describe("multi_outcome_e2e", function () {
     console.log("═══════════════════════════════════════════════\n");
 
     console.log(`  Creating 5 funded wallets...`);
-    console.log(`  ${"Name".padEnd(8)} | ${"Outcome".padEnd(9)} | ${"Bet".padEnd(8)} | ${"Protocol Fee".padEnd(13)} | ${"LP Fee".padEnd(8)} | Net`);
-    console.log(`  ${"─".repeat(72)}`);
+    console.log(`  ${"Name".padEnd(8)} | ${"Candidate".padEnd(13)} | ${"Bet".padEnd(8)} | ${"Protocol Fee".padEnd(13)} | ${"LP Fee".padEnd(8)} | Net`);
+    console.log(`  ${"─".repeat(80)}`);
 
     for (const cfg of BETTOR_CONFIG) {
       const keypair = Keypair.generate();
@@ -513,7 +513,7 @@ describe("multi_outcome_e2e", function () {
       users.push({ name: cfg.name, outcome: cfg.outcome, keypair, usdcAccount, betAmount: cfg.betAmount, positionPda });
 
       console.log(
-        `  ${cfg.name.padEnd(8)} | ${CANDIDATES[cfg.outcome].padEnd(9)} | ` +
+        `  ${cfg.name.padEnd(8)} | ${CANDIDATES[cfg.outcome].padEnd(13)} | ` +
         `${fmtUsdc(cfg.betAmount).padEnd(8)} | ${fmtUsdc(pFee).padEnd(13)} | ` +
         `${fmtUsdc(lpFee).padEnd(8)} | ${fmtUsdc(net)}`,
       );
@@ -662,7 +662,7 @@ describe("multi_outcome_e2e", function () {
     console.log(`\n  ── Pool Summary (net after fees) ──`);
     for (let i = 0; i < 4; i++) {
       const traders = users.filter(u => u.outcome === i).map(u => u.name).join(", ");
-      console.log(`  ${CANDIDATES[i].padEnd(8)}: ${fmtUsdc(poolByOutcome[i]).padEnd(9)} USDC  [${traders || "—"}]`);
+      console.log(`  ${CANDIDATES[i].padEnd(13)}: ${fmtUsdc(poolByOutcome[i]).padEnd(9)} USDC  [${traders || "—"}]`);
     }
     console.log(`  Total net:   ${fmtUsdc(totalNet)} USDC`);
     console.log(`  Total bets:  ${fmtUsdc(totalBetAmount)} USDC`);
@@ -860,6 +860,9 @@ describe("multi_outcome_e2e", function () {
             user: u.keypair.publicKey,
             market: marketPda,
             position: u.positionPda,
+            marketVault: marketVaultPda,
+            userTokenAccount: u.usdcAccount,
+            tokenProgram: TOKEN_PROGRAM_ID,
           })
           .signers([u.keypair])
           .rpc({ commitment: "confirmed" });
@@ -939,15 +942,17 @@ describe("multi_outcome_e2e", function () {
         `  ${u.name.padEnd(8)} | ${CANDIDATES[u.outcome].padEnd(9)} | ` +
         `${fmtUsdc(u.betAmount).padEnd(8)} | ${fmtUsdc(netBet).padEnd(9)} | ` +
         `${entryOdds.padEnd(12)} | ${fmtUsdc(expected).padEnd(9)} | ` +
-        `${(pnl >= 0 ? "+" : "") + fmtUsdc(Math.abs(pnl))} | ${claimed}`,
+        `${(pnl >= 0 ? "+" : "-") + fmtUsdc(Math.abs(pnl))} | ${claimed}`,
       );
     }
 
     // ── Protocol & Creator earnings summary ──────────────────────────────────
     const totalProtocolFees = users.reduce((s, u) => s + Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000), 0);
     const totalLpFees       = users.reduce((s, u) => s + Math.floor(u.betAmount * LP_FEE_BPS / 10_000), 0);
+    const marketAfterPayouts: any = await program.account.market.fetch(marketPda);
+    const accumulatedLpFees = Number(marketAfterPayouts.accumulatedLpFees.toString());
     const lpPos: any        = await program.account.lpPosition.fetch(lpPositionPda).catch(() => null);
-    const lpFeesOnChain     = lpPos ? Number(lpPos.feesEarned.toString()) : totalLpFees;
+    const lpFeesOnChain     = accumulatedLpFees || (lpPos ? Number(lpPos.feesEarned.toString()) : totalLpFees);
 
     const treasuryBal = await getAccount(connection, treasury).catch(() => null);
     const treasuryBalance = treasuryBal ? Number(treasuryBal.amount) : 0;
@@ -1071,7 +1076,7 @@ describe("multi_outcome_e2e", function () {
         console.log(
           `  ${u.name.padEnd(8)} (${CANDIDATES[u.outcome].padEnd(5)}): ` +
             `bet=${fmtUsdc(u.betAmount)} | balance=${fmtUsdc(bal.amount)} | ` +
-            `pnl=${pnl >= 0 ? "+" : ""}${fmtUsdc(Math.abs(pnl))} | ` +
+            `pnl=${pnl >= 0 ? "+" : "-"}${fmtUsdc(Math.abs(pnl))} | ` +
             `claimed=${pos?.claimed ?? "?"}`,
         );
       }
@@ -1093,10 +1098,11 @@ describe("multi_outcome_e2e", function () {
       console.log(`  Expected ratio:       ${expectedRatio}`);
       console.log(`  Actual ratio:         ${market.payoutRatio.toString()}`);
 
+      const actualLpFees = Number(market.accumulatedLpFees.toString());
       if (lpPos) {
-        console.log(`\n  Creator LP fees earned:  ${fmtUsdc(lpPos.feesEarned)} USDC`);
+        console.log(`\n  Creator LP fees earned:  ${fmtUsdc(actualLpFees)} USDC  (from market.accumulated_lp_fees)`);
         console.log(`  Creator bond:            ${fmtUsdc(CREATOR_BOND)} USDC`);
-        console.log(`  Creator total earnings:  ${fmtUsdc(Number(lpPos.feesEarned) + CREATOR_BOND)} USDC`);
+        console.log(`  Creator total earnings:  ${fmtUsdc(actualLpFees + CREATOR_BOND)} USDC`);
         console.log(`  LP fees claimed:         ${lpPos.feesClaimed}`);
         console.log(`  LP fees claimed amt:     ${fmtUsdc(lpPos.feesClaimedAmount)} USDC`);
       } else {
