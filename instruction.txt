@@ -577,3 +577,178 @@ Deadlines (set at market creation / resolution):
   resolution_deadline     — = close_time + 7 days (creator must resolve by)
   claim_deadline          — = resolution_time + 14 days
   refund_deadline         — = resolution_time + 14 days + 14 days
+
+
+MULTI-OUTCOME INSTRUCTIONS
+===========================
+
+The Multi-Outcome protocol supports markets with 2–4 discrete outcomes
+(e.g., "Who will be the president?" with candidates Alice/Bob/Carol/Dan).
+It follows the same architecture as Yes/No but uses 4 encrypted pools
+and the side/outcome is 0–3 instead of 0/1.
+
+Arcium Circuits (Multi, 4 outcomes):
+  - place_private_bet_multi: Encrypts bet into one of 4 pools.
+    Input: Enc<Mxe, MultiPools> + Enc<Shared, BetInput>.
+    Output: (Enc<Mxe, MultiPools>, entry_odds: u64).
+  - reveal_market_outcome_multi: Decrypts all 4 pool totals.
+    Input: Enc<Mxe, MultiPools> + plaintext u8 outcome.
+    Output: (pool_0, pool_1, pool_2, pool_3, payout_ratio: u64).
+  - compute_multi_payout: Verifies bet + computes payout. Uses Enc<Mxe>
+    (re-encrypted under MXE key) instead of Enc<Shared>.
+    Input: Enc<Mxe, BetInput> + plaintext outcome + ratio.
+    Output: (payout: u64, is_winner: bool).
+  - compute_multi_refund: Computes refund for unresolved markets.
+    Input: Enc<Mxe, BetInput>. Output: refund_amount: u64.
+
+
+15. CREATE MARKET MULTI (create_market_multi)
+    Signature: create_market_multi(ctx: Context<CreateMarketMulti>,
+                question: String, close_time: i64, category: u8, num_outcomes: u8)
+
+    Purpose:
+      Creates a multi-outcome market with 2–4 possible outcomes. Same $10 USDC
+      bond and LP position mechanics as Yes/No. The market_type is set to 1
+      (MULTIOUTCOME) and num_outcomes determines how many encrypted pools
+      are active (pool_2 and pool_3 also used).
+
+    Accounts (identical to create_market — see #3):
+      creator, global_state, market, lp_position, market_vault,
+      creator_token_account, accepted_mint, token_program, system_program
+
+    Differences from Yes/No:
+      - market_type = 1 (MULTIOUTCOME) internally
+      - num_outcomes stored on Market (2-4)
+      - Category is explicit parameter (0=Crypto, 1=Politics, etc.)
+
+
+16. PLACE PRIVATE BET MULTI (place_private_bet_multi)
+    Signature: place_private_bet_multi(ctx, computation_offset: u64,
+                bet_amount_usdc: u64, encrypted_amount: [u8;32],
+                encrypted_side: [u8;32], pub_key: [u8;32], nonce: u128)
+
+    Purpose:
+      User places an encrypted bet on one of 4 outcomes. The side is
+      0-3 instead of 0/1. Same fee mechanics (protocol + LP fees) but
+      NOTE: lp_position account is NOT included (removed for stack budget).
+      LP fees accumulate on market.accumulated_lp_fees instead.
+
+    Key difference from Yes/No (#7):
+      - No lp_position account (LP fees tracked on Market directly)
+      - Constraint: market.market_type == MULTIOUTCOME
+      - All 4 encrypted pools passed to the Arcium circuit (each with mxe_nonce)
+      - Circuit uses MultiPools (4 u64s) instead of YesNoPools (2 u64s)
+
+    Accounts:
+      (Arcium accounts: payer, sign_pda_account, mxe, mempool, exec pool,
+       computation, comp_def [PLACE_BET_MULTI], cluster, fee pool, clock,
+       system, arcium — same as #7)
+      user (Signer)
+      global_state (seeds=["global_state"])
+      market (mut, seeds=["market", market_id], constraint: market_type==MULTIOUTCOME)
+      market_vault (mut, seeds=["market_vault", market])
+      user_token_account (mut, constraint: owner==user, mint==accepted_mint)
+      protocol_treasury (mut, constraint: ==global_state.protocol_treasury)
+      position (init, seeds=["position", market, user])
+      token_program
+
+
+17. PLACE BET MULTI CALLBACK (place_private_bet_multi_callback)
+    #[arcium_callback(encrypted_ix = "place_private_bet_multi")]
+
+    Purpose:
+      Called by Arcium after the multi bet circuit completes. Updates all 4
+      encrypted pools (encrypted_pool_0 through encrypted_pool_3), increments
+      mxe_nonce and total_bets_count, writes entry_odds to position.
+
+    Accounts (same pattern as #8):
+      arcium_program, comp_def_account, mxe_account, computation_account,
+      cluster_account, instructions_sysvar, market (mut), position (mut)
+
+
+18. RESOLVE MARKET MULTI (resolve_market_multi)
+    Signature: resolve_market_multi(ctx, computation_offset: u64, outcome_value: u8)
+
+    Purpose:
+      Resolver submits outcome (0-3, must be < num_outcomes). Queues
+      reveal_market_outcome_multi circuit which decrypts all 4 pools and
+      computes payout_ratio = total_net / winning_pool_net. Callback
+      transitions market to Resolved.
+
+    Accounts (same pattern as #9):
+      resolver, market (constraint: market_type==MULTIOUTCOME)
+      (plus standard Arcium accounts with REVEAL_MULTI comp def offset)
+
+
+19. REVEAL OUTCOME MULTI CALLBACK (reveal_market_outcome_multi_callback)
+    #[arcium_callback(encrypted_ix = "reveal_market_outcome_multi")]
+
+    Purpose:
+      Called by Arcium after reveal circuit completes. Writes revealed_pool_0
+      through revealed_pool_3, payout_ratio. Sets state=Resolved, outcome,
+      resolution_time, claim_deadline, refund_deadline.
+
+    Accounts (same as #10):
+      arcium_program, comp_def_account, mxe_account, computation_account,
+      cluster_account, instructions_sysvar, market (mut)
+
+
+20. CLAIM PAYOUT MULTI (claim_payout_multi)
+    Signature: claim_payout_multi(ctx, computation_offset: u64)
+
+    Purpose:
+      Winning user claims payout. Note: this instruction has FEWER accounts
+      than the Yes/No version — market_vault, user_token_account, and
+      token_program are NOT in the queue instruction context. They are only
+      in the callback context (ComputeMultiPayoutCallback). The Arcium
+      cluster passes the exact accounts needed for the token transfer.
+
+    Accounts (queue instruction — no token accounts):
+      (Arcium accounts: payer, sign_pda, mxe, mempool, exec pool,
+       computation, comp_def [PAYOUT_MULTI], cluster, fee pool, clock,
+       system, arcium — same as #7)
+      user (Signer)
+      market (seeds=["market", market_id])
+      position (mut, seeds=["position", market, user], constraint: user==user)
+
+    Accounts (callback — has token accounts for the transfer):
+      arcium_program, comp_def_account, mxe_account, computation_account,
+      cluster_account, instructions_sysvar
+      position (mut — marked claimed)
+      user (mut — Unchecked, for event emission)
+      market (mut — total_payouts_claimed incremented)
+      market_vault (mut — source of payout funds, PDA-signed)
+      user_token_account (mut — destination)
+      token_program
+      system_program
+
+
+21. CLAIM REFUND MULTI (claim_refund_multi)
+    Signature: claim_refund_multi(ctx, computation_offset: u64)
+
+    Purpose:
+      Same pattern as claim_payout_multi (#20) but for unresolved markets.
+      Market state must NOT be Resolved, time must be past resolution_deadline.
+      Uses REFUND_MULTI comp def offset.
+
+    Accounts (queue — identical structure to #20):
+      Same as claim_payout_multi queue context
+
+    Accounts (callback — ComputeMultiRefundCallback):
+      Same token transfer pattern as ComputeMultiPayoutCallback (#20)
+
+
+Multi-Outcome Differences Summary
+==================================
+
+Aspect                        | Yes/No                          | Multi-Outcome
+───────────────────────────── | ─────────────────────────────── | ─────────────────────────
+market_type                   | 0 (YESNO)                       | 1 (MULTIOUTCOME)
+num_outcomes                  | 0 (unused)                      | 2, 3, or 4
+side encoding                 | 1=YES, 0=NO                     | 0, 1, 2, or 3
+Encrypted pools               | pool_0=YES, pool_1=NO           | pool_0..3 = outcomes 0..3
+Revealed pools                | revealed_pool_0/1               | revealed_pool_0/1/2/3
+lp_position in place_bet      | Yes                             | No (LP fees on market.accumulated_lp_fees)
+claim_payout token accounts   | In queue instruction            | Only in callback (not in queue)
+Payout circuit input enc      | Enc<Shared, BetInput>           | Enc<Mxe, BetInput>
+Comp def offsets              | PLACE_BET_YESNO, etc.           | PLACE_BET_MULTI, etc.
