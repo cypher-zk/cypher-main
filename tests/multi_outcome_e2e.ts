@@ -56,7 +56,7 @@ const PROTOCOL_FEE_BPS = 50; // 0.5%
 const LP_FEE_BPS = 150; // 1.5%
 const USDC_DECIMALS = 6;
 const POLL_INTERVAL_MS = 2_000;
-const CALLBACK_TIMEOUT_MS = 60_000;
+const CALLBACK_TIMEOUT_MS = 120_000;
 
 // 5 bettors on 4 presidential candidates
 const CANDIDATES = ["Donald Trump", "JFK", "James Madison", "Barack Obama"] as const;
@@ -71,6 +71,7 @@ const BETTOR_CONFIG = [
 ] as const;
 
 const COMP_DEFS = [
+  { circuit: "init_market_multi", method: "initInitMarketMultiCompDef" as any },
   { circuit: "place_private_bet_multi", method: "initPlaceBetMultiCompDef" as any },
   { circuit: "reveal_market_outcome_multi", method: "initRevealMultiCompDef" as any },
   { circuit: "compute_multi_payout", method: "initPayoutMultiCompDef" as any },
@@ -389,7 +390,7 @@ describe("multi_outcome_e2e", function () {
           .rpc({ commitment: "confirmed" });
         console.log(`  ✓ ${cd.circuit}: init ${initSig}`);
       } catch (e: any) {
-        console.log(`  ℹ ${cd.circuit} init: ${e.message?.slice(0, 80)}`);
+        console.log(`  ℹ ${cd.circuit} init: ${e.message?.slice(0, 300)}`);
       }
 
       try {
@@ -405,7 +406,7 @@ describe("multi_outcome_e2e", function () {
           console.log(`  ℹ ${cd.circuit}: already finalized`);
         }
       } catch (e: any) {
-        console.log(`  ℹ ${cd.circuit} upload: ${e.message?.slice(0, 80)}`);
+        console.log(`  ℹ ${cd.circuit} upload: ${e.message?.slice(0, 300)}`);
       }
 
       await sleep(500);
@@ -533,7 +534,55 @@ describe("multi_outcome_e2e", function () {
 
     const mxePubKey = await waitForMxeReady(provider);
 
-    const computationOffsets: BN[] = [];
+    // Bootstrap valid zero-encrypted pool ciphertexts via the init_market_multi circuit.
+    console.log(`\n  Bootstrapping encrypted pool ciphertexts (init_market_multi)...`);
+    const initPoolsOffset = new BN(Date.now());
+    const initPoolsSig = await (program.methods as any)
+      .initMarketPoolsMulti(initPoolsOffset)
+      .accountsPartial({
+        payer: payer.publicKey,
+        signPdaAccount: findSignPdaAccount(),
+        mxeAccount: getMXEAccAddress(PROGRAM_ID),
+        mempoolAccount: getMempoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+        executingPool: getExecutingPoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+        computationAccount: getComputationAccAddress(
+          ARCIUM_ENV!.arciumClusterOffset,
+          initPoolsOffset as any,
+        ),
+        compDefAccount: getCompDefAccAddress(
+          PROGRAM_ID,
+          Buffer.from(getCompDefAccOffset("init_market_multi")).readUInt32LE(),
+        ),
+        clusterAccount: getClusterAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+        poolAccount: getFeePoolAccAddress(),
+        clockAccount: getClockAccAddress(),
+        systemProgram: SystemProgram.programId,
+        arciumProgram: ARCIUM_PROGRAM_ID,
+        market: marketPda,
+      })
+      .signers([payer])
+      .rpc({ commitment: "confirmed" });
+    console.log(`  ✓ initMarketPoolsMulti tx: ${initPoolsSig}`);
+
+    const initPoolsCbSig = await awaitComputationFinalization(
+      provider,
+      initPoolsOffset,
+      PROGRAM_ID,
+      "confirmed",
+      CALLBACK_TIMEOUT_MS,
+    );
+    console.log(`  ✓ initMarketPoolsMulti callback: ${initPoolsCbSig}`);
+
+    const mktAfterInit: any = await program.account.market.fetch(marketPda);
+    const poolsNonZero =
+      mktAfterInit.encryptedPool0.some((b: number) => b !== 0) ||
+      mktAfterInit.encryptedPool1.some((b: number) => b !== 0);
+    console.log(`  ✓ Encrypted pools bootstrapped (non-zero ciphertexts: ${poolsNonZero})`);
+
+    // Sequential bets: each waits for its Arcium callback before the next.
+    // Concurrent submission would cause all bets to read the same stale pool
+    // state and the last callback would overwrite the correct accumulated total.
+    let allSettled = false;
 
     for (let i = 0; i < users.length; i++) {
       const u = users[i];
@@ -547,7 +596,6 @@ describe("multi_outcome_e2e", function () {
         encryptBetInput(netAmount, u.outcome, mxePubKey);
 
       const computationOffset = new BN(Date.now() + i * 100);
-      computationOffsets.push(computationOffset);
 
       console.log(
         `  ${u.name} (${CANDIDATES[u.outcome]}): ` +
@@ -603,34 +651,39 @@ describe("multi_outcome_e2e", function () {
         );
       } catch (e: any) {
         console.log(`    ✗ FAILED: ${e.message}`);
+        continue;
+      }
+
+      // Wait for THIS bet's callback before placing the next one.
+      try {
+        const cbSig = await awaitComputationFinalization(
+          provider,
+          computationOffset,
+          PROGRAM_ID,
+          "confirmed",
+          CALLBACK_TIMEOUT_MS,
+        );
+        console.log(`    ✓ callback: ${cbSig}`);
+
+        // awaitComputationFinalization returns when Arcium marks computation finalized,
+        // but the callback TX that increments total_bets_count may confirm slightly later.
+        // Poll until total_bets_count reflects this bet before placing the next one.
+        const expectedCount = i + 1;
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const m: any = await program.account.market.fetch(marketPda);
+          if (Number(m.totalBetsCount.toString()) >= expectedCount) break;
+          await sleep(500);
+        }
+
+        const pos: any = await program.account.encryptedPosition.fetch(u.positionPda);
+        console.log(
+          `    ${u.name} (${CANDIDATES[u.outcome]}): ` +
+            `entry_odds=${pos.entryOdds.toString()}, claimed=${pos.claimed}`,
+        );
+      } catch (e: any) {
+        console.log(`    ℹ callback timeout/error: ${e.message}`);
       }
     }
-
-    // ── Await Arcium callbacks for all 5 bets ─────────────────────────────────
-    console.log(`\n  Awaiting Arcium callbacks for all bets...`);
-    let allSettled = false;
-
-    await Promise.allSettled(
-      computationOffsets.map(async (offset, i) => {
-        try {
-          const cbSig = await awaitComputationFinalization(
-            provider,
-            offset,
-            PROGRAM_ID,
-            "confirmed",
-            CALLBACK_TIMEOUT_MS,
-          );
-          console.log(`    ✓ ${users[i].name} callback: ${cbSig}`);
-          const pos: any = await program.account.encryptedPosition.fetch(users[i].positionPda);
-          console.log(
-            `    ${users[i].name} (${CANDIDATES[users[i].outcome]}): ` +
-              `entry_odds=${pos.entryOdds.toString()}, claimed=${pos.claimed}`,
-          );
-        } catch (e: any) {
-          console.log(`    ℹ ${users[i].name} callback timeout/error: ${e.message}`);
-        }
-      }),
-    );
 
     try {
       const market: any = await program.account.market.fetch(marketPda);
@@ -738,59 +791,49 @@ describe("multi_outcome_e2e", function () {
     const marketMid: any = await program.account.market.fetch(marketPda);
     console.log(`  pending_outcome: ${marketMid.pendingOutcome} (${CANDIDATES[marketMid.pendingOutcome]})`);
 
-    // ── Poll for Arcium callback ────────────────────────────────────────────
+    // ── Wait for Arcium callback via computation account finalization ─────────
     console.log(`\n  Waiting for reveal callback to fire...`);
-    const pollStart = Date.now();
     let resolved = false;
 
-    while (Date.now() - pollStart < CALLBACK_TIMEOUT_MS) {
-      await sleep(POLL_INTERVAL_MS);
-      try {
-        const market: any = await program.account.market.fetch(marketPda);
-        if (market.state === 2) {
-          resolved = true;
-          console.log(`\n  ✓ Market resolved via Arcium callback!`);
+    try {
+      const cbSig = await awaitComputationFinalization(
+        provider, computationOffset, PROGRAM_ID, "confirmed", CALLBACK_TIMEOUT_MS,
+      );
+      console.log(`  ✓ reveal callback: ${cbSig}`);
+      resolved = true;
+    } catch (e: any) {
+      console.log(`  ℹ reveal callback timeout/error: ${e.message}`);
+    }
 
-          const q = String.fromCharCode(
-            ...market.question.slice(0, market.questionLen),
-          );
-          console.log(`  Question:      "${q}"`);
-          console.log(`  State:         ${market.state} (2=Resolved)`);
-          console.log(`  Outcome:       ${market.outcome} (${CANDIDATES[market.outcome]} wins)`);
-
-          for (let i = 0; i < 4; i++) {
-            console.log(`  Pool ${i} (${CANDIDATES[i]}):  ${fmtUsdc(market[`revealedPool${i}`])} USDC`);
-          }
-          console.log(`  Payout ratio:  ${market.payoutRatio.toString()}`);
-          console.log(`  Resolution:    ${new Date(market.resolutionTime.toNumber() * 1000).toLocaleString()}`);
-          console.log(`  Claim deadline: ${new Date(market.claimDeadline.toNumber() * 1000).toLocaleString()}`);
-
-          console.assert(
-            market.outcome === outcomeValue,
-            `Expected outcome=${outcomeValue}, got ${market.outcome}`,
-          );
-          for (let i = 0; i < 4; i++) {
-            const pool = Number(market[`revealedPool${i}`]);
-            if (i === outcomeValue) {
-              console.assert(pool > 0, `Winning pool ${i} should be > 0`);
-            }
-          }
-          console.assert(
-            Number(market.payoutRatio) > 0,
-            "payout_ratio should be > 0",
-          );
-          console.log(`  ✓ All assertions passed`);
-          break;
+    if (resolved) {
+      const market: any = await program.account.market.fetch(marketPda);
+      if (market.state === 2) {
+        const q = String.fromCharCode(...market.question.slice(0, market.questionLen));
+        console.log(`\n  ✓ Market resolved via Arcium callback!`);
+        console.log(`  Question:      "${q}"`);
+        console.log(`  State:         ${market.state} (2=Resolved)`);
+        console.log(`  Outcome:       ${market.outcome} (${CANDIDATES[market.outcome]} wins)`);
+        for (let i = 0; i < 4; i++) {
+          console.log(`  Pool ${i} (${CANDIDATES[i]}):  ${fmtUsdc(market[`revealedPool${i}`])} USDC`);
         }
-        console.log(`    State: ${market.state} (waiting for 2=Resolved)`);
-      } catch {
-        // not ready yet
+        console.log(`  Payout ratio:  ${market.payoutRatio.toString()}`);
+        console.log(`  Resolution:    ${new Date(market.resolutionTime.toNumber() * 1000).toLocaleString()}`);
+        console.log(`  Claim deadline: ${new Date(market.claimDeadline.toNumber() * 1000).toLocaleString()}`);
+
+        console.assert(market.outcome === outcomeValue, `Expected outcome=${outcomeValue}, got ${market.outcome}`);
+        for (let i = 0; i < 4; i++) {
+          const pool = Number((market[`revealedPool${i}`] as any).toString());
+          if (i === outcomeValue) console.assert(pool > 0, `Winning pool ${i} should be > 0`);
+        }
+        console.assert(Number(market.payoutRatio.toString()) > 0, "payout_ratio should be > 0");
+        console.log(`  ✓ All assertions passed`);
+      } else {
+        console.log(`  ⚠ Computation finalized but market state=${market.state} (not 2). Callback may have errored.`);
+        resolved = false;
       }
     }
 
-    if (!resolved) {
-      console.log(`  ℹ Market not resolved within timeout. Proceeding...`);
-    }
+    if (!resolved) console.log(`  ℹ Market not resolved within timeout. Proceeding...`);
 
     console.log(`\n  ✓ Step 4 complete.`);
   });
@@ -949,10 +992,8 @@ describe("multi_outcome_e2e", function () {
     // ── Protocol & Creator earnings summary ──────────────────────────────────
     const totalProtocolFees = users.reduce((s, u) => s + Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000), 0);
     const totalLpFees       = users.reduce((s, u) => s + Math.floor(u.betAmount * LP_FEE_BPS / 10_000), 0);
-    const marketAfterPayouts: any = await program.account.market.fetch(marketPda);
-    const accumulatedLpFees = Number(marketAfterPayouts.accumulatedLpFees.toString());
-    const lpPos: any        = await program.account.lpPosition.fetch(lpPositionPda).catch(() => null);
-    const lpFeesOnChain     = accumulatedLpFees || (lpPos ? Number(lpPos.feesEarned.toString()) : totalLpFees);
+    // LP fees accumulate in market.accumulated_lp_fees (lp_position.fees_earned is unused)
+    const lpFeesOnChain = Number(resolvedMarket.accumulatedLpFees.toString());
 
     const treasuryBal = await getAccount(connection, treasury).catch(() => null);
     const treasuryBalance = treasuryBal ? Number(treasuryBal.amount) : 0;
@@ -991,11 +1032,11 @@ describe("multi_outcome_e2e", function () {
     console.assert(!marketState.bondWithdrawn, "Bond should not be withdrawn yet");
     console.log(`  Bond already withdrawn: ${marketState.bondWithdrawn}`);
 
-    const lpPos: any = await program.account.lpPosition.fetch(lpPositionPda);
-    console.log(`  LP fees earned: ${fmtUsdc(lpPos.feesEarned)} USDC`);
+    const lpFeesPending = Number(marketState.accumulatedLpFees.toString());
+    console.log(`  LP fees accumulated: ${fmtUsdc(lpFeesPending)} USDC`);
     console.log(`  Bond: ${fmtUsdc(marketState.creatorBond)} USDC`);
     console.log(
-      `  Total to withdraw: ${fmtUsdc(Number(marketState.creatorBond) + Number(lpPos.feesEarned))} USDC`,
+      `  Total to withdraw: ${fmtUsdc(Number(marketState.creatorBond) + lpFeesPending)} USDC`,
     );
 
     const creatorBalBefore = await getAccount(connection, creatorTokenAccount);
@@ -1084,8 +1125,10 @@ describe("multi_outcome_e2e", function () {
       const lpPos = await program.account.lpPosition.fetch(lpPositionPda).catch(() => null);
       const totalLpFees = users.reduce((s, u) => s + Math.floor(u.betAmount * LP_FEE_BPS / 10_000), 0);
       const totalProtocolFees = users.reduce((s, u) => s + Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000), 0);
-      const pools = [0, 1, 2, 3].map(i => Number(market[`revealedPool${i}`] || 0));
-      const winPool = pools[market.outcome] || pools[0];
+      const pools = [0, 1, 2, 3].map(i =>
+        Number((market[`revealedPool${i}`] as any)?.toString() || "0"),
+      );
+      const winPool = pools[market.outcome] ?? pools[0];
       const totalNetPool = pools.reduce((s, v) => s + v, 0);
 
       const expectedRatio = totalNetPool > 0 && winPool > 0

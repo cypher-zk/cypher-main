@@ -48,39 +48,58 @@ mod circuits {
     //    .encrypted_u64(encrypted_amount)         ← BetInput.amount
     //    .encrypted_u8(encrypted_side)            ← BetInput.side
 
+    // CIRCUIT 0 — init_market_yesno
+    //
+    // Called once after market creation to bootstrap valid zero-encrypted pool ciphertexts.
+    // Without this, to_arcis() on the raw-zero bytes returns garbage values.
+    //
+    // ArgBuilder order:
+    //   .plaintext_u128(market.mxe_nonce)        ← 0 initially
+    //   .encrypted_u64(market.encrypted_pool_0)  ← [0u8; 32] initially
+    //   .encrypted_u64(market.encrypted_pool_1)  ← [0u8; 32] initially
+
+    #[instruction]
+    pub fn init_market_yesno(current_pools: Enc<Mxe, YesNoPools>) -> Enc<Mxe, YesNoPools> {
+        // Re-encrypt (0, 0) under the MXE key to produce valid ciphertexts.
+        // The input ciphertexts are raw zeros and are only used for their `.owner` key.
+        current_pools.owner.from_arcis(YesNoPools {
+            yes_pool: 0u64,
+            no_pool: 0u64,
+        })
+    }
+
     #[instruction]
     pub fn place_private_bet_yesno(
         current_pools: Enc<Mxe, YesNoPools>,
         bet: Enc<Shared, BetInput>,
     ) -> (Enc<Mxe, YesNoPools>, u64) {
-        // decrypt inside MXE
         let pools = current_pools.to_arcis();
         let b = bet.to_arcis();
 
-        // update the correct pool
+        // Pools are guaranteed to be valid zero-encryptions before the first bet
+        // (via init_market_yesno), so to_arcis() always returns meaningful values.
         let (new_yes, new_no) = if b.side == 1 {
             (pools.yes_pool + b.amount, pools.no_pool)
         } else {
             (pools.yes_pool, pools.no_pool + b.amount)
         };
 
-        // entry_odds = total_pool / side_pool — locked for this user
-        // stored as a u64 scaled by 1_000_000_000 (i.e. 1.5x = 1_500_000_000)
         let total = new_yes + new_no;
         let side_pool = if b.side == 1 { new_yes } else { new_no };
+        // Both branches of the MUX always execute in arcis circuits, but the
+        // selector discards the unused result. side_pool==0 only if amount==0
+        // (rejected on-chain), so the division is valid in practice.
         let entry_odds = if side_pool > 0 {
             total * 1_000_000_000 / side_pool
         } else {
             1_000_000_000
         };
 
-        // re-encrypt new pools for MXE storage
         let new_pools = current_pools.owner.from_arcis(YesNoPools {
             yes_pool: new_yes,
             no_pool: new_no,
         });
 
-        // entry_odds returned as PLAINTEXT — stored publicly on EncryptedPosition
         (new_pools, entry_odds.reveal())
     }
 
@@ -111,12 +130,12 @@ mod circuits {
         };
         let total_pool = pools.yes_pool + pools.no_pool;
 
-        // payout_ratio = total / winner scaled by 1e9
-        let payout_ratio = if winner_pool > 0 {
-            total_pool * 1_000_000_000 / winner_pool
-        } else {
-            1_000_000_000
-        };
+        // Arcium circuits always execute BOTH branches of if/else (MUX selects result).
+        // Dividing by winner_pool would abort if winner_pool == 0, even in the else branch.
+        // Safe fix: substitute 1 as divisor when winner_pool == 0 so no branch divides by zero.
+        let safe_divisor = if winner_pool > 0 { winner_pool } else { 1_u64 };
+        let computed_ratio = total_pool * 1_000_000_000 / safe_divisor;
+        let payout_ratio = if winner_pool > 0 { computed_ratio } else { 1_000_000_000 };
 
         // all PLAINTEXT — callback writes these to Market publicly
         (
@@ -190,6 +209,25 @@ mod circuits {
     //    .encrypted_u64(encrypted_amount)
     //    .encrypted_u8(encrypted_side)
 
+    // CIRCUIT 4b — init_market_multi
+    //
+    // Called once after multi-outcome market creation to bootstrap valid zero-encrypted pools.
+    //
+    // ArgBuilder order:
+    //   .plaintext_u128(market.mxe_nonce)
+    //   .encrypted_u64(market.encrypted_pool_0)
+    //   ... (repeat for pools 1,2,3)
+
+    #[instruction]
+    pub fn init_market_multi(current_pools: Enc<Mxe, MultiPools>) -> Enc<Mxe, MultiPools> {
+        current_pools.owner.from_arcis(MultiPools {
+            pool_0: 0u64,
+            pool_1: 0u64,
+            pool_2: 0u64,
+            pool_3: 0u64,
+        })
+    }
+
     #[instruction]
     pub fn place_private_bet_multi(
         current_pools: Enc<Mxe, MultiPools>,
@@ -199,30 +237,10 @@ mod circuits {
         let b = bet.to_arcis();
 
         let (p0, p1, p2, p3) = match b.side {
-            0 => (
-                pools.pool_0 + b.amount,
-                pools.pool_1,
-                pools.pool_2,
-                pools.pool_3,
-            ),
-            1 => (
-                pools.pool_0,
-                pools.pool_1 + b.amount,
-                pools.pool_2,
-                pools.pool_3,
-            ),
-            2 => (
-                pools.pool_0,
-                pools.pool_1,
-                pools.pool_2 + b.amount,
-                pools.pool_3,
-            ),
-            _ => (
-                pools.pool_0,
-                pools.pool_1,
-                pools.pool_2,
-                pools.pool_3 + b.amount,
-            ),
+            0 => (pools.pool_0 + b.amount, pools.pool_1, pools.pool_2, pools.pool_3),
+            1 => (pools.pool_0, pools.pool_1 + b.amount, pools.pool_2, pools.pool_3),
+            2 => (pools.pool_0, pools.pool_1, pools.pool_2 + b.amount, pools.pool_3),
+            _ => (pools.pool_0, pools.pool_1, pools.pool_2, pools.pool_3 + b.amount),
         };
 
         let total = p0 + p1 + p2 + p3;
@@ -232,7 +250,6 @@ mod circuits {
             2 => p2,
             _ => p3,
         };
-
         let entry_odds = if side_pool > 0 {
             total * 1_000_000_000 / side_pool
         } else {
@@ -275,11 +292,11 @@ mod circuits {
         };
 
         let total = p.pool_0 + p.pool_1 + p.pool_2 + p.pool_3;
-        let payout_ratio = if winner_pool > 0 {
-            total * 1_000_000_000 / winner_pool
-        } else {
-            1_000_000_000
-        };
+
+        // Same safe-divisor pattern: both if/else branches execute in circuit context.
+        let safe_divisor = if winner_pool > 0 { winner_pool } else { 1_u64 };
+        let computed_ratio = total * 1_000_000_000 / safe_divisor;
+        let payout_ratio = if winner_pool > 0 { computed_ratio } else { 1_000_000_000 };
 
         // plaintext: pool_0, pool_1, pool_2, pool_3, payout_ratio
         (

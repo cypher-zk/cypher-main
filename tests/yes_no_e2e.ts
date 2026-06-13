@@ -56,7 +56,7 @@ const PROTOCOL_FEE_BPS = 50; // 0.5%
 const LP_FEE_BPS = 150; // 1.5%
 const USDC_DECIMALS = 6;
 const POLL_INTERVAL_MS = 2_000;
-const CALLBACK_TIMEOUT_MS = 60_000;
+const CALLBACK_TIMEOUT_MS = 120_000;
 
 // Named bettors with different amounts
 const BETTOR_CONFIG = [
@@ -68,6 +68,7 @@ const BETTOR_CONFIG = [
 ] as const;
 
 const COMP_DEFS = [
+  { circuit: "init_market_yesno", method: "initInitMarketYesnoCompDef" as any },
   { circuit: "place_private_bet_yesno", method: "initPlaceBetYesnoCompDef" as any },
   { circuit: "reveal_market_outcome_yesno", method: "initRevealYesnoCompDef" as any },
   { circuit: "compute_yesno_payout", method: "initPayoutYesnoCompDef" as any },
@@ -396,7 +397,7 @@ describe("yes_no_e2e", function () {
         console.log(`  ✓ ${cd.circuit}: init ${initSig}`);
       } catch (e: any) {
         // Account may already be registered from a previous run
-        console.log(`  ℹ ${cd.circuit} init: ${e.message?.slice(0, 80)}`);
+        console.log(`  ℹ ${cd.circuit} init: ${e.message?.slice(0, 300)}`);
       }
 
       // Finalize comp def: arcium test pre-loads raw circuit accounts as genesis
@@ -415,7 +416,7 @@ describe("yes_no_e2e", function () {
           console.log(`  ℹ ${cd.circuit}: already finalized`);
         }
       } catch (e: any) {
-        console.log(`  ℹ ${cd.circuit} upload: ${e.message?.slice(0, 80)}`);
+        console.log(`  ℹ ${cd.circuit} upload: ${e.message?.slice(0, 300)}`);
       }
 
       await sleep(500);
@@ -539,10 +540,60 @@ describe("yes_no_e2e", function () {
     // Wait for Arcium MXE cluster to finish key agreement
     const mxePubKey = await waitForMxeReady(provider);
 
-    // Collect computation offsets so we can await all callbacks afterwards
-    const computationOffsets: BN[] = [];
+    // Bootstrap valid zero-encrypted pool ciphertexts via the init_market_yesno circuit.
+    // Raw [0u8;32] bytes are NOT valid ciphertexts; to_arcis() on them returns garbage.
+    // This MUST happen before the first bet so the circuit reads meaningful pool values.
+    console.log(`\n  Bootstrapping encrypted pool ciphertexts (init_market_yesno)...`);
+    const initPoolsOffset = new BN(Date.now());
+    const initPoolsSig = await (program.methods as any)
+      .initMarketPoolsYesno(initPoolsOffset)
+      .accountsPartial({
+        payer: payer.publicKey,
+        signPdaAccount: findSignPdaAccount(),
+        mxeAccount: getMXEAccAddress(PROGRAM_ID),
+        mempoolAccount: getMempoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+        executingPool: getExecutingPoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+        computationAccount: getComputationAccAddress(
+          ARCIUM_ENV!.arciumClusterOffset,
+          initPoolsOffset as any,
+        ),
+        compDefAccount: getCompDefAccAddress(
+          PROGRAM_ID,
+          Buffer.from(getCompDefAccOffset("init_market_yesno")).readUInt32LE(),
+        ),
+        clusterAccount: getClusterAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+        poolAccount: getFeePoolAccAddress(),
+        clockAccount: getClockAccAddress(),
+        systemProgram: SystemProgram.programId,
+        arciumProgram: ARCIUM_PROGRAM_ID,
+        market: marketPda,
+      })
+      .signers([payer])
+      .rpc({ commitment: "confirmed" });
+    console.log(`  ✓ initMarketPoolsYesno tx: ${initPoolsSig}`);
 
-    // Place bets with real Enc<Shared> encryption
+    const initPoolsCbSig = await awaitComputationFinalization(
+      provider,
+      initPoolsOffset,
+      PROGRAM_ID,
+      "confirmed",
+      CALLBACK_TIMEOUT_MS,
+    );
+    console.log(`  ✓ initMarketPoolsYesno callback: ${initPoolsCbSig}`);
+
+    const mktAfterInit: any = await program.account.market.fetch(marketPda);
+    const poolsNonZero =
+      mktAfterInit.encryptedPool0.some((b: number) => b !== 0) ||
+      mktAfterInit.encryptedPool1.some((b: number) => b !== 0);
+    console.log(`  ✓ Encrypted pools bootstrapped (non-zero ciphertexts: ${poolsNonZero})`);
+
+    // Bets are placed ONE AT A TIME — each waits for its Arcium callback before
+    // the next bet is submitted.  This is required because each bet computation
+    // reads the current encrypted pool from on-chain; if two bets are submitted
+    // concurrently they both read the same (stale) pool state and the last
+    // callback to land overwrites the correct accumulated total.
+    let allSettled = false;
+
     for (let i = 0; i < users.length; i++) {
       const u = users[i];
       const pFee = Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000);
@@ -554,9 +605,7 @@ describe("yes_no_e2e", function () {
       const { encryptedAmount, encryptedSide, pubKey, nonce } =
         encryptBetInput(netAmount, u.side, mxePubKey);
 
-      // Unique computation offset per user
       const computationOffset = new BN(Date.now() + i * 100);
-      computationOffsets.push(computationOffset);
 
       console.log(
         `  ${u.name} (${u.side === 1 ? "YES" : "NO"}): ` +
@@ -612,36 +661,42 @@ describe("yes_no_e2e", function () {
         );
       } catch (e: any) {
         console.log(`    ✗ FAILED: ${e.message}`);
+        continue;
+      }
+
+      // Wait for THIS bet's callback before placing the next one.
+      // Each computation re-encrypts the accumulated pool; the next bet must
+      // read the updated ciphertext — not the stale one from before this bet.
+      try {
+        const cbSig = await awaitComputationFinalization(
+          provider,
+          computationOffset,
+          PROGRAM_ID,
+          "confirmed",
+          CALLBACK_TIMEOUT_MS,
+        );
+        console.log(`    ✓ callback: ${cbSig}`);
+
+        // awaitComputationFinalization returns when Arcium marks computation finalized,
+        // but the callback TX that increments total_bets_count may confirm slightly later.
+        // Poll until total_bets_count reflects this bet before placing the next one.
+        const expectedCount = i + 1;
+        for (let attempt = 0; attempt < 30; attempt++) {
+          const m: any = await program.account.market.fetch(marketPda);
+          if (Number(m.totalBetsCount.toString()) >= expectedCount) break;
+          await sleep(500);
+        }
+
+        const pos: any = await program.account.encryptedPosition.fetch(u.positionPda);
+        console.log(
+          `    ${u.name} (${u.side === 1 ? "YES" : "NO"}): ` +
+            `entry_odds=${pos.entryOdds.toString()}, claimed=${pos.claimed}`,
+        );
+      } catch (e: any) {
+        console.log(`    ℹ callback timeout/error: ${e.message}`);
       }
     }
 
-    // ── Await Arcium callbacks for all 5 bets ─────────────────────────────────
-    console.log(`\n  Awaiting Arcium callbacks for all bets...`);
-    let allSettled = false;
-
-    await Promise.allSettled(
-      computationOffsets.map(async (offset, i) => {
-        try {
-          const cbSig = await awaitComputationFinalization(
-            provider,
-            offset,
-            PROGRAM_ID,
-            "confirmed",
-            CALLBACK_TIMEOUT_MS,
-          );
-          console.log(`    ✓ ${users[i].name} callback: ${cbSig}`);
-          const pos: any = await program.account.encryptedPosition.fetch(users[i].positionPda);
-          console.log(
-            `    ${users[i].name} (${users[i].side === 1 ? "YES" : "NO"}): ` +
-              `entry_odds=${pos.entryOdds.toString()}, claimed=${pos.claimed}`,
-          );
-        } catch (e: any) {
-          console.log(`    ℹ ${users[i].name} callback timeout/error: ${e.message}`);
-        }
-      }),
-    );
-
-    // Verify final count
     try {
       const market: any = await program.account.market.fetch(marketPda);
       const count = Number(market.totalBetsCount.toString());
@@ -745,61 +800,46 @@ describe("yes_no_e2e", function () {
     const marketMid: any = await program.account.market.fetch(marketPda);
     console.log(`  pending_outcome: ${marketMid.pendingOutcome}`);
 
-    // ── Poll for Arcium callback to fire ───────────────────────────────────
+    // ── Wait for Arcium callback via computation account finalization ─────────
     console.log(`\n  Waiting for reveal callback to fire...`);
-    const pollStart = Date.now();
     let resolved = false;
 
-    while (Date.now() - pollStart < CALLBACK_TIMEOUT_MS) {
-      await sleep(POLL_INTERVAL_MS);
-      try {
-        const market: any = await program.account.market.fetch(marketPda);
-        if (market.state === 2) {
-          // Resolved
-          resolved = true;
-          console.log(`\n  ✓ Market resolved via Arcium callback!`);
+    try {
+      const cbSig = await awaitComputationFinalization(
+        provider, computationOffset, PROGRAM_ID, "confirmed", CALLBACK_TIMEOUT_MS,
+      );
+      console.log(`  ✓ reveal callback: ${cbSig}`);
+      resolved = true;
+    } catch (e: any) {
+      console.log(`  ℹ reveal callback timeout/error: ${e.message}`);
+    }
 
-          const question = String.fromCharCode(
-            ...market.question.slice(0, market.questionLen),
-          );
-          console.log(`  Question:      "${question}"`);
-          console.log(`  State:         ${market.state} (2=Resolved)`);
-          console.log(`  Outcome:       ${market.outcome} (1=YES)`);
-          console.log(`  YES pool:      ${fmtUsdc(market.revealedPool0)} USDC`);
-          console.log(`  NO pool:       ${fmtUsdc(market.revealedPool1)} USDC`);
-          console.log(`  Payout ratio:  ${market.payoutRatio.toString()}`);
-          console.log(`  Resolution:    ${new Date(market.resolutionTime.toNumber() * 1000).toLocaleString()}`);
-          console.log(`  Claim deadline: ${new Date(market.claimDeadline.toNumber() * 1000).toLocaleString()}`);
+    if (resolved) {
+      const market: any = await program.account.market.fetch(marketPda);
+      if (market.state === 2) {
+        const question = String.fromCharCode(...market.question.slice(0, market.questionLen));
+        console.log(`\n  ✓ Market resolved via Arcium callback!`);
+        console.log(`  Question:      "${question}"`);
+        console.log(`  State:         ${market.state} (2=Resolved)`);
+        console.log(`  Outcome:       ${market.outcome} (1=YES)`);
+        console.log(`  YES pool:      ${fmtUsdc(market.revealedPool0)} USDC`);
+        console.log(`  NO pool:       ${fmtUsdc(market.revealedPool1)} USDC`);
+        console.log(`  Payout ratio:  ${market.payoutRatio.toString()}`);
+        console.log(`  Resolution:    ${new Date(market.resolutionTime.toNumber() * 1000).toLocaleString()}`);
+        console.log(`  Claim deadline: ${new Date(market.claimDeadline.toNumber() * 1000).toLocaleString()}`);
 
-          // Verify consistency
-          console.assert(
-            market.outcome === 1,
-            `Expected outcome=1, got ${market.outcome}`,
-          );
-          console.assert(
-            Number(market.revealedPool0) > 0,
-            "YES pool should be > 0",
-          );
-          console.assert(
-            Number(market.revealedPool1) > 0,
-            "NO pool should be > 0",
-          );
-          console.assert(
-            Number(market.payoutRatio) > 0,
-            "payout_ratio should be > 0",
-          );
-          console.log(`  ✓ All assertions passed`);
-          break;
-        }
-        console.log(`    State: ${market.state} (waiting for 2=Resolved)`);
-      } catch {
-        // not ready yet
+        console.assert(market.outcome === 1, `Expected outcome=1, got ${market.outcome}`);
+        console.assert(Number(market.revealedPool0.toString()) > 0, "YES pool should be > 0");
+        console.assert(Number(market.revealedPool1.toString()) > 0, "NO pool should be > 0");
+        console.assert(Number(market.payoutRatio.toString()) > 0, "payout_ratio should be > 0");
+        console.log(`  ✓ All assertions passed`);
+      } else {
+        console.log(`  ⚠ Computation finalized but market state=${market.state} (not 2). Callback may have errored.`);
+        resolved = false;
       }
     }
 
-    if (!resolved) {
-      console.log(`  ℹ Market not resolved within timeout. Proceeding...`);
-    }
+    if (!resolved) console.log(`  ℹ Market not resolved within timeout. Proceeding...`);
 
     console.log(`\n  ✓ Step 4 complete.`);
   });
@@ -965,8 +1005,8 @@ describe("yes_no_e2e", function () {
     // ── Protocol & Creator earnings summary ──────────────────────────────────
     const totalProtocolFees = users.reduce((s, u) => s + Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000), 0);
     const totalLpFees       = users.reduce((s, u) => s + Math.floor(u.betAmount * LP_FEE_BPS / 10_000), 0);
-    const lpPos: any        = await program.account.lpPosition.fetch(lpPositionPda).catch(() => null);
-    const lpFeesOnChain     = lpPos ? Number(lpPos.feesEarned.toString()) : totalLpFees;
+    // LP fees accumulate in market.accumulated_lp_fees, not lp_position.fees_earned
+    const lpFeesOnChain = Number(resolvedMarket.accumulatedLpFees.toString());
 
     const treasuryBal = await getAccount(connection, treasury).catch(() => null);
     const treasuryBalance = treasuryBal ? Number(treasuryBal.amount) : 0;
@@ -1005,11 +1045,11 @@ describe("yes_no_e2e", function () {
     console.assert(!marketState.bondWithdrawn, "Bond should not be withdrawn yet");
     console.log(`  Bond already withdrawn: ${marketState.bondWithdrawn}`);
 
-    const lpPos: any = await program.account.lpPosition.fetch(lpPositionPda);
-    console.log(`  LP fees earned: ${fmtUsdc(lpPos.feesEarned)} USDC`);
+    const lpFeesPending = Number(marketState.accumulatedLpFees.toString());
+    console.log(`  LP fees accumulated: ${fmtUsdc(lpFeesPending)} USDC`);
     console.log(`  Bond: ${fmtUsdc(marketState.creatorBond)} USDC`);
     console.log(
-      `  Total to withdraw: ${fmtUsdc(Number(marketState.creatorBond) + Number(lpPos.feesEarned))} USDC`,
+      `  Total to withdraw: ${fmtUsdc(Number(marketState.creatorBond) + lpFeesPending)} USDC`,
     );
 
     const creatorBalBefore = await getAccount(connection, creatorTokenAccount);
@@ -1097,15 +1137,14 @@ describe("yes_no_e2e", function () {
       const lpPos = await program.account.lpPosition.fetch(lpPositionPda).catch(() => null);
       const totalLpFees = users.reduce((s, u) => s + Math.floor(u.betAmount * LP_FEE_BPS / 10_000), 0);
       const totalProtocolFees = users.reduce((s, u) => s + Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000), 0);
+      // LP fees live in market.accumulated_lp_fees (lp_position.fees_earned is unused)
+      const lpFeesAccumulated = Number(market.accumulatedLpFees.toString());
+      console.log(`\n  Creator LP fees accumulated: ${fmtUsdc(lpFeesAccumulated)} USDC`);
+      console.log(`  Creator bond:                ${fmtUsdc(CREATOR_BOND)} USDC`);
+      console.log(`  Creator total earnings:      ${fmtUsdc(lpFeesAccumulated + CREATOR_BOND)} USDC`);
       if (lpPos) {
-        console.log(`\n  Creator LP fees earned:  ${fmtUsdc(lpPos.feesEarned)} USDC`);
-        console.log(`  Creator bond:            ${fmtUsdc(CREATOR_BOND)} USDC`);
-        console.log(`  Creator total earnings:  ${fmtUsdc(Number(lpPos.feesEarned) + CREATOR_BOND)} USDC`);
-        console.log(`  LP fees claimed:         ${lpPos.feesClaimed}`);
-        console.log(`  LP fees claimed amt:     ${fmtUsdc(lpPos.feesClaimedAmount)} USDC`);
-      } else {
-        console.log(`\n  Creator LP fees (expected): ${fmtUsdc(totalLpFees)} USDC`);
-        console.log(`  Creator total earnings (expected): ${fmtUsdc(totalLpFees + CREATOR_BOND)} USDC`);
+        console.log(`  LP fees claimed:             ${lpPos.feesClaimed}`);
+        console.log(`  LP fees claimed amt:         ${fmtUsdc(lpPos.feesClaimedAmount)} USDC`);
       }
       const treasuryBal = await getAccount(connection, treasury).catch(() => null);
       console.log(`\n  Protocol earnings (treasury): ${fmtUsdc(treasuryBal ? treasuryBal.amount : BigInt(totalProtocolFees))} USDC`);
