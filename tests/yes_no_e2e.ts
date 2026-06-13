@@ -51,13 +51,21 @@ const ARCIUM_ENV = (() => {
 })();
 
 const SIGN_PDA_SEED = Buffer.from("ArciumSignerAccount");
-const BET_AMOUNT = 5_000_000; // 5 USDC per bettor
 const CREATOR_BOND = 10_000_000; // 10 USDC bond
 const PROTOCOL_FEE_BPS = 50; // 0.5%
 const LP_FEE_BPS = 150; // 1.5%
 const USDC_DECIMALS = 6;
 const POLL_INTERVAL_MS = 2_000;
 const CALLBACK_TIMEOUT_MS = 60_000;
+
+// Named bettors with different amounts
+const BETTOR_CONFIG = [
+  { name: "Bob",   side: 1, betAmount: 10_000_000 }, // 10 USDC  YES
+  { name: "Carol", side: 1, betAmount:  5_000_000 }, //  5 USDC  YES
+  { name: "Dan",   side: 0, betAmount: 20_000_000 }, // 20 USDC  NO
+  { name: "Even",  side: 0, betAmount: 15_000_000 }, // 15 USDC  NO
+  { name: "Frank", side: 1, betAmount:  8_000_000 }, //  8 USDC  YES
+] as const;
 
 const COMP_DEFS = [
   { circuit: "place_private_bet_yesno", method: "initPlaceBetYesnoCompDef" as any },
@@ -225,9 +233,11 @@ describe("yes_no_e2e", function () {
   let marketIndex: number;
 
   const users: {
+    name: string;
     keypair: Keypair;
     usdcAccount: PublicKey;
     side: number; // 1 = YES, 0 = NO
+    betAmount: number;
     positionPda: PublicKey;
   }[] = [];
 
@@ -484,37 +494,32 @@ describe("yes_no_e2e", function () {
     console.log("  STEP 3: 5 TRADERS PLACE BETS");
     console.log("═══════════════════════════════════════════════\n");
 
-    // Create 5 users — 3 bet YES (side=1), 2 bet NO (side=0)
-    const betSides = [1, 1, 1, 0, 0]; // 3x YES, 2x NO
-
     console.log(`  Creating 5 funded wallets...`);
+    console.log(`  ${"Name".padEnd(6)} | ${"Side".padEnd(4)} | ${"Bet".padEnd(8)} | ${"Protocol Fee".padEnd(13)} | ${"LP Fee".padEnd(8)} | Net`);
+    console.log(`  ${"─".repeat(70)}`);
 
-    for (let i = 0; i < 5; i++) {
+    for (const cfg of BETTOR_CONFIG) {
       const keypair = Keypair.generate();
-      const sig = await connection.requestAirdrop(
-        keypair.publicKey,
-        2 * LAMPORTS_PER_SOL,
-      );
+      const sig = await connection.requestAirdrop(keypair.publicKey, 2 * LAMPORTS_PER_SOL);
       await connection.confirmTransaction(sig, "confirmed");
 
       const usdcAccount = await createAccount(
-        connection,
-        payer,
-        usdcMint,
-        keypair.publicKey,
-        Keypair.generate(),
+        connection, payer, usdcMint, keypair.publicKey, Keypair.generate(),
       );
 
-      await mintTo(connection, payer, usdcMint, usdcAccount, payer, BET_AMOUNT);
+      await mintTo(connection, payer, usdcMint, usdcAccount, payer, cfg.betAmount);
 
       const positionPda = findPositionPda(marketPda, keypair.publicKey);
+      const pFee = Math.floor(cfg.betAmount * PROTOCOL_FEE_BPS / 10_000);
+      const lpFee = Math.floor(cfg.betAmount * LP_FEE_BPS / 10_000);
+      const net = cfg.betAmount - pFee - lpFee;
 
-      users.push({ keypair, usdcAccount, side: betSides[i], positionPda });
+      users.push({ name: cfg.name, keypair, usdcAccount, side: cfg.side, betAmount: cfg.betAmount, positionPda });
 
       console.log(
-        `  User ${i + 1}: ${keypair.publicKey.toBase58().slice(0, 12)}... ` +
-          `| ${betSides[i] === 1 ? "YES" : "NO"} | ` +
-          `Token: ${usdcAccount.toBase58().slice(0, 12)}...`,
+        `  ${cfg.name.padEnd(6)} | ${(cfg.side === 1 ? "YES" : "NO").padEnd(4)} | ` +
+        `${fmtUsdc(cfg.betAmount).padEnd(8)} | ${fmtUsdc(pFee).padEnd(13)} | ` +
+        `${fmtUsdc(lpFee).padEnd(8)} | ${fmtUsdc(net)}`,
       );
     }
 
@@ -534,37 +539,35 @@ describe("yes_no_e2e", function () {
     // Wait for Arcium MXE cluster to finish key agreement
     const mxePubKey = await waitForMxeReady(provider);
 
-    // Compute net bet amount (user must encrypt the post-fee amount)
-    const protocol_fee = Math.floor(BET_AMOUNT * PROTOCOL_FEE_BPS / 10_000);
-    const lp_fee = Math.floor(BET_AMOUNT * LP_FEE_BPS / 10_000);
-    const NET_BET_AMOUNT = BET_AMOUNT - protocol_fee - lp_fee;
-    console.log(`  Net bet per user: ${fmtUsdc(NET_BET_AMOUNT)} USDC (after fees)`);
-
     // Collect computation offsets so we can await all callbacks afterwards
     const computationOffsets: BN[] = [];
 
     // Place bets with real Enc<Shared> encryption
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < users.length; i++) {
       const u = users[i];
+      const pFee = Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000);
+      const lpFee = Math.floor(u.betAmount * LP_FEE_BPS / 10_000);
+      const netAmount = u.betAmount - pFee - lpFee;
+
       const vaultBefore = await getAccount(connection, marketVaultPda);
 
       const { encryptedAmount, encryptedSide, pubKey, nonce } =
-        encryptBetInput(NET_BET_AMOUNT, u.side, mxePubKey);
+        encryptBetInput(netAmount, u.side, mxePubKey);
 
       // Unique computation offset per user
       const computationOffset = new BN(Date.now() + i * 100);
       computationOffsets.push(computationOffset);
 
       console.log(
-        `  Bettor ${i + 1} (${u.side === 1 ? "YES" : "NO"}): ` +
-          `placing ${fmtUsdc(BET_AMOUNT)} USDC...`,
+        `  ${u.name} (${u.side === 1 ? "YES" : "NO"}): ` +
+          `placing ${fmtUsdc(u.betAmount)} USDC  [net=${fmtUsdc(netAmount)}]...`,
       );
 
       try {
         const betSig = await (program.methods as any)
           .placePrivateBetYesno(
             computationOffset,
-            new BN(BET_AMOUNT),
+            new BN(u.betAmount),
             encryptedAmount,
             encryptedSide,
             pubKey,
@@ -626,16 +629,14 @@ describe("yes_no_e2e", function () {
             "confirmed",
             CALLBACK_TIMEOUT_MS,
           );
-          console.log(`    ✓ Bet ${i + 1} callback: ${cbSig}`);
-          const pos: any = await program.account.encryptedPosition.fetch(
-            users[i].positionPda,
-          );
+          console.log(`    ✓ ${users[i].name} callback: ${cbSig}`);
+          const pos: any = await program.account.encryptedPosition.fetch(users[i].positionPda);
           console.log(
-            `    User ${i + 1} (${users[i].side === 1 ? "YES" : "NO"}): ` +
+            `    ${users[i].name} (${users[i].side === 1 ? "YES" : "NO"}): ` +
               `entry_odds=${pos.entryOdds.toString()}, claimed=${pos.claimed}`,
           );
         } catch (e: any) {
-          console.log(`    ℹ Bet ${i + 1} callback timeout/error: ${e.message}`);
+          console.log(`    ℹ ${users[i].name} callback timeout/error: ${e.message}`);
         }
       }),
     );
@@ -644,19 +645,42 @@ describe("yes_no_e2e", function () {
     try {
       const market: any = await program.account.market.fetch(marketPda);
       const count = Number(market.totalBetsCount.toString());
-      console.log(`\n  total_bets_count: ${count} / 5`);
-      allSettled = count >= 5;
-      if (allSettled) console.log(`  ✓ All 5 bets confirmed on-chain!`);
+      console.log(`\n  total_bets_count: ${count} / ${users.length}`);
+      allSettled = count >= users.length;
+      if (allSettled) console.log(`  ✓ All ${users.length} bets confirmed on-chain!`);
     } catch {}
 
     if (!allSettled) {
       console.log(`  ℹ Not all callbacks received within timeout.`);
     }
 
+    // ── Fee + Pool summary ────────────────────────────────────────────────────
+    const totalBetAmount = users.reduce((s, u) => s + u.betAmount, 0);
+    const totalProtocolFees = users.reduce((s, u) => s + Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000), 0);
+    const totalLpFees = users.reduce((s, u) => s + Math.floor(u.betAmount * LP_FEE_BPS / 10_000), 0);
+    const totalNetYes = users.filter(u => u.side === 1).reduce((s, u) => {
+      const pFee = Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000);
+      const lpFee = Math.floor(u.betAmount * LP_FEE_BPS / 10_000);
+      return s + u.betAmount - pFee - lpFee;
+    }, 0);
+    const totalNetNo = users.filter(u => u.side === 0).reduce((s, u) => {
+      const pFee = Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000);
+      const lpFee = Math.floor(u.betAmount * LP_FEE_BPS / 10_000);
+      return s + u.betAmount - pFee - lpFee;
+    }, 0);
+
+    console.log(`\n  ── Fee & Pool Summary (expected) ──`);
+    console.log(`  Total bet volume:     ${fmtUsdc(totalBetAmount)} USDC`);
+    console.log(`  Protocol fees (0.5%): ${fmtUsdc(totalProtocolFees)} USDC`);
+    console.log(`  LP fees (1.5%):       ${fmtUsdc(totalLpFees)} USDC`);
+    console.log(`  YES pool (net):       ${fmtUsdc(totalNetYes)} USDC  [Bob+Carol+Frank]`);
+    console.log(`  NO pool (net):        ${fmtUsdc(totalNetNo)} USDC  [Dan+Even]`);
+
     // Check vault balance
     try {
       const vaultFinal = await getAccount(connection, marketVaultPda);
       console.log(`\n  Final vault balance: ${fmtUsdc(vaultFinal.amount)} USDC`);
+      console.log(`  (vault = creator_bond + all_bets - protocol_fees sent to treasury)`);
     } catch (e: any) {
       console.log(`\n  Could not fetch vault balance: ${e.message}`);
     }
@@ -798,15 +822,15 @@ describe("yes_no_e2e", function () {
     const vaultBeforeClaim = await getAccount(connection, marketVaultPda);
     console.log(`  Vault balance before claims: ${fmtUsdc(vaultBeforeClaim.amount)} USDC`);
 
-    // Process all 5 users: YES bettors (0,1,2) win, NO bettors (3,4) lose
+    // Process all users: YES bettors win, NO bettors lose
     // But claims are individual — each user queues their own computation
 
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < users.length; i++) {
       const u = users[i];
       const isWinner = u.side === 1; // YES wins
 
       console.log(
-        `\n  ── User ${i + 1} (${isWinner ? "WINNER" : "LOSER"}) ──`,
+        `\n  ── ${u.name} (${u.side === 1 ? "YES" : "NO"} | bet=${fmtUsdc(u.betAmount)} USDC | ${isWinner ? "WINNER" : "LOSER"}) ──`,
       );
 
       const posBefore: any = await program.account.encryptedPosition.fetch(
@@ -871,16 +895,14 @@ describe("yes_no_e2e", function () {
       await sleep(POLL_INTERVAL_MS);
       try {
         const claims: boolean[] = [];
-        for (let i = 0; i < 5; i++) {
-          const pos: any = await program.account.encryptedPosition.fetch(
-            users[i].positionPda,
-          );
+        for (let i = 0; i < users.length; i++) {
+          const pos: any = await program.account.encryptedPosition.fetch(users[i].positionPda);
           claims.push(pos.claimed);
         }
         const claimed = claims.filter(Boolean).length;
-        console.log(`    Claimed: ${claimed} / 5`);
+        console.log(`    Claimed: ${claimed} / ${users.length}`);
 
-        if (claimed >= 5) {
+        if (claimed >= users.length) {
           allClaimed = true;
           console.log(`\n  ✓ All positions claimed via callbacks!`);
           break;
@@ -894,32 +916,74 @@ describe("yes_no_e2e", function () {
       console.log(`  ℹ Not all callbacks received. Reading current state...`);
     }
 
-    // Read final state
+    // Read final state with per-user payout detail
+    const resolvedMarket: any = await program.account.market.fetch(marketPda);
+    const payoutRatio = Number(resolvedMarket.payoutRatio.toString());
+    const revealedYes = Number(resolvedMarket.revealedPool0.toString());
+    const revealedNo  = Number(resolvedMarket.revealedPool1.toString());
+
     console.log(`\n  ── Final Position States ──`);
-    for (let i = 0; i < 5; i++) {
+    console.log(`  YES pool (revealed): ${fmtUsdc(revealedYes)} USDC`);
+    console.log(`  NO pool (revealed):  ${fmtUsdc(revealedNo)} USDC`);
+    console.log(`  Payout ratio:        ${payoutRatio} (×${(payoutRatio / 1e9).toFixed(4)})`);
+    console.log(``);
+    console.log(`  ${"Name".padEnd(6)} | ${"Side".padEnd(4)} | ${"Bet".padEnd(8)} | ${"Net Bet".padEnd(9)} | ${"entry_odds".padEnd(12)} | ${"Payout".padEnd(9)} | ${"P&L".padEnd(9)} | claimed`);
+    console.log(`  ${"─".repeat(90)}`);
+
+    let totalPayoutToWinners = 0;
+
+    for (let i = 0; i < users.length; i++) {
       const u = users[i];
       const pos: any = await program.account.encryptedPosition
         .fetch(u.positionPda)
         .catch(() => null);
       const tokenBal = await getAccount(connection, u.usdcAccount);
 
-      if (pos) {
-        console.log(
-          `  User ${i + 1} (${u.side === 1 ? "YES" : "NO"}): ` +
-            `claimed=${pos.claimed} | ` +
-            `USDC=${fmtUsdc(tokenBal.amount)} | ` +
-            `entry_odds=${pos.entryOdds.toString()}`,
-        );
-      } else {
-        console.log(
-          `  User ${i + 1}: position not found | USDC=${fmtUsdc(tokenBal.amount)}`,
-        );
-      }
+      const pFee = Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000);
+      const lpFee = Math.floor(u.betAmount * LP_FEE_BPS / 10_000);
+      const netBet = u.betAmount - pFee - lpFee;
+      const isWinner = u.side === 1; // YES wins
+
+      // Expected payout = netBet * payoutRatio / 1e9  (for winners)
+      const expectedPayout = isWinner ? Math.floor(netBet * payoutRatio / 1e9) : 0;
+      const actualBalance = Number(tokenBal.amount);
+      const pnl = actualBalance - u.betAmount; // net gain/loss vs initial deposit
+
+      if (isWinner) totalPayoutToWinners += expectedPayout;
+
+      const entryOdds = pos ? pos.entryOdds.toString() : "?";
+      const claimed   = pos ? pos.claimed.toString() : "?";
+
+      console.log(
+        `  ${u.name.padEnd(6)} | ${(u.side === 1 ? "YES" : "NO").padEnd(4)} | ` +
+        `${fmtUsdc(u.betAmount).padEnd(8)} | ${fmtUsdc(netBet).padEnd(9)} | ` +
+        `${entryOdds.padEnd(12)} | ${fmtUsdc(expectedPayout).padEnd(9)} | ` +
+        `${(pnl >= 0 ? "+" : "") + fmtUsdc(Math.abs(pnl))} | ${claimed}`,
+      );
     }
 
-    // Check vault balance
+    // ── Protocol & Creator earnings summary ──────────────────────────────────
+    const totalProtocolFees = users.reduce((s, u) => s + Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000), 0);
+    const totalLpFees       = users.reduce((s, u) => s + Math.floor(u.betAmount * LP_FEE_BPS / 10_000), 0);
+    const lpPos: any        = await program.account.lpPosition.fetch(lpPositionPda).catch(() => null);
+    const lpFeesOnChain     = lpPos ? Number(lpPos.feesEarned.toString()) : totalLpFees;
+
+    const treasuryBal = await getAccount(connection, treasury).catch(() => null);
+    const treasuryBalance = treasuryBal ? Number(treasuryBal.amount) : 0;
+
     const vaultAfter = await getAccount(connection, marketVaultPda);
-    console.log(`\n  Vault balance after claims: ${fmtUsdc(vaultAfter.amount)} USDC`);
+
+    console.log(`\n  ── Financial Summary ──`);
+    console.log(`  YES pool (net):           ${fmtUsdc(revealedYes)} USDC`);
+    console.log(`  NO pool (net):            ${fmtUsdc(revealedNo)} USDC`);
+    console.log(`  Total bets volume:        ${fmtUsdc(users.reduce((s, u) => s + u.betAmount, 0))} USDC`);
+    console.log(`  Protocol fees (0.5%):     ${fmtUsdc(totalProtocolFees)} USDC  →  treasury`);
+    console.log(`  LP fees (1.5%):           ${fmtUsdc(lpFeesOnChain)} USDC  →  creator`);
+    console.log(`  Creator bond:             ${fmtUsdc(CREATOR_BOND)} USDC  →  creator`);
+    console.log(`  Creator earnings total:   ${fmtUsdc(CREATOR_BOND + lpFeesOnChain)} USDC  (bond + LP fees)`);
+    console.log(`  Protocol earnings:        ${fmtUsdc(treasuryBalance)} USDC  (treasury balance)`);
+    console.log(`  Total payout to winners:  ~${fmtUsdc(totalPayoutToWinners)} USDC`);
+    console.log(`  Vault balance after:      ${fmtUsdc(vaultAfter.amount)} USDC`);
     console.log(`\n  ✓ Steps 5+6 complete.`);
   });
 
@@ -1021,21 +1085,30 @@ describe("yes_no_e2e", function () {
           .fetch(u.positionPda)
           .catch(() => null);
         const bal = await getAccount(connection, u.usdcAccount);
-        const net = Number(bal.amount) - BET_AMOUNT;
+        const pnl = Number(bal.amount) - u.betAmount;
         console.log(
-          `  User ${i + 1} (${u.side === 1 ? "YES" : "NO"}): ` +
-            `${fmtUsdc(bal.amount)} USDC ` +
-            `(${net >= 0 ? "+" : ""}${fmtUsdc(Math.abs(net))} USDC) ` +
+          `  ${u.name.padEnd(6)} (${u.side === 1 ? "YES" : "NO"}): ` +
+            `bet=${fmtUsdc(u.betAmount)} | balance=${fmtUsdc(bal.amount)} | ` +
+            `pnl=${pnl >= 0 ? "+" : ""}${fmtUsdc(Math.abs(pnl))} | ` +
             `claimed=${pos?.claimed ?? "?"}`,
         );
       }
 
       const lpPos = await program.account.lpPosition.fetch(lpPositionPda).catch(() => null);
+      const totalLpFees = users.reduce((s, u) => s + Math.floor(u.betAmount * LP_FEE_BPS / 10_000), 0);
+      const totalProtocolFees = users.reduce((s, u) => s + Math.floor(u.betAmount * PROTOCOL_FEE_BPS / 10_000), 0);
       if (lpPos) {
-        console.log(`\n  Creator LP fees earned: ${fmtUsdc(lpPos.feesEarned)} USDC`);
-        console.log(`  LP fees claimed:       ${lpPos.feesClaimed}`);
-        console.log(`  LP fees claimed amt:   ${fmtUsdc(lpPos.feesClaimedAmount)} USDC`);
+        console.log(`\n  Creator LP fees earned:  ${fmtUsdc(lpPos.feesEarned)} USDC`);
+        console.log(`  Creator bond:            ${fmtUsdc(CREATOR_BOND)} USDC`);
+        console.log(`  Creator total earnings:  ${fmtUsdc(Number(lpPos.feesEarned) + CREATOR_BOND)} USDC`);
+        console.log(`  LP fees claimed:         ${lpPos.feesClaimed}`);
+        console.log(`  LP fees claimed amt:     ${fmtUsdc(lpPos.feesClaimedAmount)} USDC`);
+      } else {
+        console.log(`\n  Creator LP fees (expected): ${fmtUsdc(totalLpFees)} USDC`);
+        console.log(`  Creator total earnings (expected): ${fmtUsdc(totalLpFees + CREATOR_BOND)} USDC`);
       }
+      const treasuryBal = await getAccount(connection, treasury).catch(() => null);
+      console.log(`\n  Protocol earnings (treasury): ${fmtUsdc(treasuryBal ? treasuryBal.amount : BigInt(totalProtocolFees))} USDC`);
     } catch (e: any) {
       console.log(`  Could not fetch final state: ${e.message}`);
     }
