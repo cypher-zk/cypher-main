@@ -1,18 +1,15 @@
 use anchor_lang::prelude::*;
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  CYPHER — states.rs   (YesNo + MultiOutcome)
-//  Modelled directly on Flew's account structure
-// ─────────────────────────────────────────────────────────────────────────────
+// CYPHER — states.rs   (YesNo + MultiOutcome)
 
-// ── SPACE CONSTANTS ──────────────────────────────────────────────────────────
+// ── SPACE CONSTANTS
 
 pub const GLOBAL_STATE_SPACE: usize = 8   // discriminator
     + 8   // market_counter: u64
     + 2   // protocol_fee_rate: u16
     + 2   // lp_fee_rate: u16
     + 32  // protocol_treasury: Pubkey
-    + 32  // accepted_mint: Pubkey     ← USDC mint (Flew uses SOL, we use USDC)
+    + 32  // accepted_mint: Pubkey     
     + 32  // admin: Pubkey
     + 1   // bump: u8
     + 6; // padding
@@ -22,6 +19,7 @@ pub const MARKET_SPACE: usize = 8    // discriminator
     + 200 // question: [u8; 200]
     + 1   // question_len: u8
     + 1   // market_type: u8   0=YesNo, 1=MultiOutcome
+    + 1  // category: u8
     + 32  // creator: Pubkey
     + 32  // resolver: Pubkey
     + 8   // creator_bond: u64
@@ -79,28 +77,38 @@ pub const LP_POSITION_SPACE: usize = 8   // discriminator
     + 1   // bump: u8
     + 6; // padding
 
-// ── MARKET STATES (u8 for Arcium compatibility) ───────────────────────────
+// MARKET STATES (u8 for Arcium compatibility)
 pub const MARKET_STATE_ACTIVE: u8 = 0;
 pub const MARKET_STATE_CLOSED: u8 = 1;
 pub const MARKET_STATE_RESOLVED: u8 = 2;
 pub const MARKET_STATE_UNRESOLVED: u8 = 3; // resolution deadline passed
 
-// ── MARKET TYPES ─────────────────────────────────────────────────────────────
+//  MARKET TYPES
 pub const MARKET_TYPE_YESNO: u8 = 0;
 pub const MARKET_TYPE_MULTIOUTCOME: u8 = 1;
 
-// ── DEFAULT TIME CONSTANTS ────────────────────────────────────────────────────
+//  DEFAULT TIME CONSTANTS
 pub const DEFAULT_RESOLUTION_WINDOW: i64 = 7 * 24 * 3600; // 7 days after close
 pub const DEFAULT_CLAIM_PERIOD: i64 = 14 * 24 * 3600; // 14 days after resolution
 pub const DEFAULT_REFUND_PERIOD: i64 = 14 * 24 * 3600; // 14 days after unresolved
 
-// ── MIN BET ──────────────────────────────────────────────────────────────────
+// MIN BET
 pub const MIN_BET_USDC: u64 = 1_000_000; // $1 USDC minimum
 pub const CREATOR_BOND: u64 = 10_000_000; // $10 USDC bond
 
-// ─────────────────────────────────────────────────────────────────────────────
+// CATEGORY CONSTANTS (u8 for Arcium compatibility)
+
+pub const CATEGORY_CRYPTO: u8 = 0;
+pub const CATEGORY_POLITICS: u8 = 1;
+pub const CATEGORY_SPORTS: u8 = 2;
+pub const CATEGORY_TECH: u8 = 3;
+pub const CATEGORY_ECONOMY: u8 = 4;
+pub const CATEGORY_CULTURE: u8 = 5;
+pub const CATEGORY_BEYOND: u8 = 6;
+
+//
 //  ACCOUNTS
-// ─────────────────────────────────────────────────────────────────────────────
+//
 
 /// Protocol-wide config. One per deployment.
 /// Seeds: ["global_state"]
@@ -130,6 +138,7 @@ pub struct Market {
     pub question_len: u8,
     /// 0 = YesNo, 1 = MultiOutcome
     pub market_type: u8,
+    pub category: u8,
     pub creator: Pubkey,
     /// Who can call resolve_market
     pub resolver: Pubkey,
@@ -222,6 +231,7 @@ pub struct LPPosition {
 pub struct MarketCreatedEvent {
     pub market_id: u64,
     pub market_type: u8,
+    pub category: u8,
     pub creator: Pubkey,
     pub question: String,
     pub close_time: i64,
@@ -352,4 +362,6 @@ pub enum CypherError {
     WrongMarketType,
     #[msg("Mint does not match accepted mint")]
     WrongMint,
+    #[msg("Invalid category — must be 0-6")]
+    InvalidCategory,
 }

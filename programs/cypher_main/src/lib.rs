@@ -56,6 +56,7 @@ pub mod cypher {
         ctx: Context<CreateMarket>,
         question: String,
         close_time: i64,
+        category: u8,
     ) -> Result<()> {
         require!(!question.is_empty(), CypherError::EmptyQuestion);
         require!(question.len() <= 200, CypherError::QuestionTooLong);
@@ -63,6 +64,7 @@ pub mod cypher {
             close_time > Clock::get()?.unix_timestamp,
             CypherError::InvalidCloseTime
         );
+        require!(category <= 6, CypherError::InvalidCategory);
 
         token::transfer(
             CpiContext::new(
@@ -86,6 +88,7 @@ pub mod cypher {
         m.question = q;
         m.question_len = question.len() as u8;
         m.market_type = MARKET_TYPE_YESNO;
+        m.category = category;
         m.creator = ctx.accounts.creator.key();
         m.resolver = ctx.accounts.creator.key();
         m.creator_bond = CREATOR_BOND;
@@ -135,6 +138,7 @@ pub mod cypher {
         emit!(MarketCreatedEvent {
             market_id: mid,
             market_type: MARKET_TYPE_YESNO,
+            category,
             creator: ctx.accounts.creator.key(),
             question,
             close_time,
