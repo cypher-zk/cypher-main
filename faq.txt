@@ -1,0 +1,273 @@
+Cypher Protocol — Frontend FAQ
+
+This assumes you use an off-chain indexer (as decided) that ingests events
+from the chain and exposes a REST/GraphQL API. Each answer gives:
+  - What to fetch from the indexer
+  - How to derive it if querying the chain directly
+
+
+Q1: Show all markets on the frontend
+-------------------------------------
+
+Indexer route:
+  GET /markets?state=active
+  Returns: list of Market objects (id, question, category, state, deadlines, etc.)
+
+How the indexer builds this:
+  - Listens for MarketCreatedEvent → inserts market into DB.
+  - Listens for MarketResolvedEvent → updates state to Resolved + outcome.
+  - Listens for MarketCancelledEvent → marks state as Cancelled.
+
+Chain-only fallback (use getProgramAccounts):
+  - Fetch all Market accounts: program.program.connection.getProgramAccounts(PROGRAM_ID)
+  - Filter by account data offset 8 (discriminator) to deserialize as Market.
+  - WARNING: breaks with 1000+ markets due to RPC limits.
+
+
+Q2: Show user's open positions (bets)
+
+
+Indexer route:
+  GET /positions?user=<wallet>&market=<optional>
+  Returns: list of EncryptedPosition objects for that user.
+
+How the indexer builds this:
+  - Listens for BetPlacedEvent → inserts position record with user, market,
+    encrypted_amount, encrypted_side, entry_odds, claimed=false.
+  - Listens for PayoutClaimedEvent / RefundClaimedEvent → marks claimed=true.
+
+Chain-only fallback:
+  - You know the user's wallet. But Position PDAs are seeded with
+    ["position", market_key, user_key]. Without knowing which markets the
+    user bet on, you can't derive the PDAs directly.
+  - Option A: Use getProgramAccounts with memcmp filter at byte offset:
+      8 (discriminator) + 0 (user Pubkey) = offset 8, 32 bytes = user's pubkey.
+  - Option B: Cross-reference all markets and attempt to fetch the Position
+    PDA for each one (expensive).
+
+
+Q3: Show total staked in YES pool / NO pool
+
+
+BEFORE resolution (market is Active):
+  - encrypted_pool_0 and encrypted_pool_1 are Arcium-encrypted ciphertexts
+    ([u8; 32] each). These are NOT readable — the whole point of the protocol
+    is that individual bets and pool totals stay hidden until resolution.
+  - You CANNOT show YES/NO totals before resolution.
+
+AFTER resolution (market is Resolved):
+  - revealed_pool_0 = total USDC in YES pool (decrypted u64)
+  - revealed_pool_1 = total USDC in NO pool (decrypted u64)
+
+Indexer route:
+  GET /markets/<market_id>
+  Returns: { revealed_pool_0, revealed_pool_1 } if resolved, else null.
+
+How the indexer builds this:
+  - Listens for MarketResolvedEvent → stores revealed_pool_0/1, payout_ratio.
+
+
+Q4: Show LP positions (creator earnings)
+-----------------------------------------
+
+Indexer route:
+  GET /lp-positions?lp_provider=<wallet>
+  Returns: list of LPPosition objects with fees_earned, claimed status.
+
+How the indexer builds this:
+  - Listens for MarketCreatedEvent → creates LPPosition record.
+  - Tracks accumulated_lp_fees from BetPlacedEvent data (or on-chain read).
+
+Chain-only fallback:
+  - LPPosition PDAs are seeded with ["lp-position", market_key, creator_key].
+  - Same problem as Q2 — need to know which markets the user created.
+  - Use getProgramAccounts with memcmp at offset:
+      8 (discriminator) + 0 (lp_provider Pubkey) = offset 8, filter on user's pubkey.
+
+
+Q5: Show markets a user created
+--------------------------------
+
+Indexer route:
+  GET /markets?creator=<wallet>
+  Returns: list of Market objects where market.creator == wallet.
+
+Chain-only fallback:
+  - getProgramAccounts with memcmp at offset:
+      8 (discriminator)        // anchor discriminator: 8 bytes
+    + 8 (market_id)            // u64: 8 bytes
+    + 200 (question)           // [u8;200]: 200 bytes
+    + 1 (question_len)         // u8: 1 byte
+    + 1 (market_type)          // u8: 1 byte
+    = offset 218, 32 bytes = creator Pubkey
+  - memcmp: offset=218, bytes=user's pubkey.
+
+
+Q6: Show market details on a details page
+------------------------------------------
+
+Indexer route:
+  GET /markets/<market_id>?include=positions
+  Returns: full Market object + optionally positions count.
+
+Fields to display (from Market struct):
+  Field                | Source                | Type
+  ---------------------|-----------------------|----------
+  question             | market.question       | string (200 bytes)
+  market_id            | market.market_id      | u64
+  category             | (future)              | u8
+  state                | market.state          | Active/Resolved/etc
+  outcome              | market.outcome        | u8 (after resolution)
+  creator              | market.creator        | Pubkey
+  resolver             | market.resolver       | Pubkey
+  total_bets_count     | market.total_bets_count | u64
+  revealed_pool_0      | (after resolution)    | u64 (YES total)
+  revealed_pool_1      | (after resolution)    | u64 (NO total)
+  payout_ratio         | (after resolution)    | u64 (scaled 1e9)
+  accumulated_lp_fees  | market.accumulated_lp_fees | u64
+  accumulated_protocol_fees | market.accumulated_protocol_fees | u64
+  min_bet              | market.min_bet        | u64 ($1 USDC default)
+  close_time           | market.close_time     | i64 (epoch seconds)
+  resolution_time      | market.resolution_time | i64
+  resolution_deadline  | market.resolution_deadline | i64
+  claim_deadline       | market.claim_deadline | i64
+  refund_deadline      | market.refund_deadline | i64
+  total_payouts_claimed | market.total_payouts_claimed | u64
+  total_refunds_claimed | market.total_refunds_claimed | u64
+
+
+Q7: Show deadlines on the frontend
+-----------------------------------
+
+All deadlines are i64 Unix timestamps (epoch seconds). Convert with:
+  new Date(timestamp * 1000)
+
+Available deadline fields on Market:
+
+  Field               | Set at            | Meaning
+  --------------------|-------------------|-------------------------------------------
+  close_time          | market creation   | Betting closes. No more bets accepted.
+  resolution_deadline | market creation   | = close_time + 7 days.
+                      |                   | Creator must resolve before this or bond
+                      |                   | can be slashed via refund path.
+  resolution_time     | resolution        | When the market was actually resolved.
+                      |                   | 0 until resolved.
+  claim_deadline      | resolution        | = resolution_time + 14 days.
+                      |                   | Winners must claim payout before this.
+  refund_deadline     | resolution        | = resolution_time + 28 days.
+                      |                   | After this, admin can sweep unclaimed funds.
+
+Display logic for the frontend:
+
+  function getDeadlineStatus(market) {
+    const now = Date.now() / 1000;
+
+    if (market.state === 'Active' || market.state === 'Closed') {
+      if (now < market.close_time)
+        return { label: 'Betting closes', time: market.close_time };
+      if (now < market.resolution_deadline)
+        return { label: 'Resolution due', time: market.resolution_deadline };
+      else
+        return { label: 'Resolution overdue', time: market.resolution_deadline };
+    }
+
+    if (market.state === 'Resolved') {
+      if (now < market.claim_deadline)
+        return { label: 'Claim deadline', time: market.claim_deadline };
+      if (now < market.refund_deadline)
+        return { label: 'Refund deadline', time: market.refund_deadline };
+      else
+        return { label: 'All deadlines passed', time: null };
+    }
+
+    if (market.state === 'Unresolved') {
+      return { label: 'Refund deadline', time: market.refund_deadline };
+    }
+  }
+
+Indexer route for deadlines:
+  GET /markets/<market_id>/deadlines
+  Returns: { close_time, resolution_deadline, resolution_time, claim_deadline, refund_deadline }
+
+
+Byte Offsets Reference for Chain Queries (getProgramAccounts memcmp)
+====================================================================
+
+Market account (after 8-byte discriminator):
+  Offset  | Size | Field
+  --------|------|-------------------
+  0       | 8    | market_id
+  8       | 200  | question
+  208     | 1    | question_len
+  209     | 1    | market_type
+  210     | 32   | creator          ← useful: filter by creator
+  242     | 32   | resolver
+  274     | 8    | creator_bond
+  282     | 1    | bond_withdrawn
+  283     | 8    | total_bets_count
+  291     | 32   | encrypted_pool_0
+  323     | 32   | encrypted_pool_1
+  355     | 32   | encrypted_pool_2
+  387     | 32   | encrypted_pool_3
+  419     | 16   | mxe_nonce
+  435     | 8    | revealed_pool_0
+  443     | 8    | revealed_pool_1
+  451     | 8    | revealed_pool_2
+  459     | 8    | revealed_pool_3
+  467     | 1    | state            ← useful: filter by state
+  468     | 1    | outcome
+  469     | 1    | pending_outcome
+  470     | 8    | close_time
+  478     | 8    | resolution_time
+  486     | 8    | payout_ratio
+  494     | 8    | accumulated_lp_fees
+  502     | 8    | accumulated_protocol_fees
+  510     | 8    | min_bet
+  518     | 8    | total_payouts_claimed
+  526     | 8    | total_refunds_claimed
+  534     | 1    | admin_claimed_remaining
+  535     | 1    | pending_outcome
+  536     | 8    | resolution_deadline
+  544     | 8    | claim_deadline
+  552     | 8    | refund_deadline
+  560     | 1    | bump
+  561     | 1    | vault_bump
+
+EncryptedPosition account (after 8-byte discriminator):
+  Offset  | Size | Field
+  --------|------|-------------------
+  0       | 32   | user             ← useful: filter by user
+  32      | 32   | market
+  64      | 32   | encrypted_amount
+  96      | 32   | encrypted_side
+  128     | 32   | user_pubkey
+  160     | 16   | nonce
+  176     | 8    | entry_odds
+  184     | 1    | claimed
+  185     | 1    | bump
+
+LPPosition account (after 8-byte discriminator):
+  Offset  | Size | Field
+  --------|------|-------------------
+  0       | 32   | lp_provider      ← useful: filter by creator
+  32      | 32   | market
+  64      | 8    | liquidity_provided
+  72      | 8    | fees_earned
+  80      | 1    | fees_claimed
+  81      | 8    | fees_claimed_amount
+  89      | 1    | bump
+
+
+Q8: Can I make the rent from closed accounts go to a specific address (e.g. myself as admin)?
+---------------------------------------------------------------------------------------------
+
+Yes. Anchor's `#[account(close = <destination>)]` attribute does exactly this.
+When the account is closed (zeroed + deleted), its rent lamports are sent to
+the specified destination. For example, to return sign_pda_account rent to
+the payer:
+
+    #[account(mut, close = payer, seeds = [&SIGN_PDA_SEED], bump)]
+    pub sign_pda_account: Account<'info, ArciumSignerAccount>,
+
+You can set `close` to any account in the struct — the admin, the payer, a
+treasury, or any other wallet.

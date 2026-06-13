@@ -137,7 +137,7 @@ pub struct Market {
     pub bond_withdrawn: bool,
     pub total_bets_count: u64,
 
-    // ── Encrypted pools — updated by place_private_bet circuit ────────────
+    //  Encrypted pools — updated by place_private_bet circuit
     // YesNo:        pool_0=YES, pool_1=NO, pool_2=0, pool_3=0
     // MultiOutcome: pool_0..3 = outcome 0..3
     pub encrypted_pool_0: [u8; 32],

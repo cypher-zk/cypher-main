@@ -188,7 +188,7 @@ pub mod cypher {
             CypherError::NotResolved
         );
 
-        let lp_fees = ctx.accounts.lp_position.fees_earned;
+        let lp_fees = ctx.accounts.market.accumulated_lp_fees;
         let bond = ctx.accounts.market.creator_bond;
         let total = bond.checked_add(lp_fees).ok_or(CypherError::Overflow)?;
 
@@ -330,12 +330,6 @@ pub mod cypher {
                 .ok_or(CypherError::Overflow)?;
         }
 
-        ctx.accounts.lp_position.fees_earned = ctx
-            .accounts
-            .lp_position
-            .fees_earned
-            .checked_add(lp_fee)
-            .ok_or(CypherError::Overflow)?;
         ctx.accounts.market.accumulated_lp_fees = ctx
             .accounts
             .market
@@ -695,11 +689,7 @@ pub mod cypher {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 //  ACCOUNT CONTEXTS
-//  FIX 1: All comp_def_account UncheckedAccount fields have /// CHECK: comments
-//  FIX 2: All large accounts are Box<Account<'info, T>> to stay under 4096 bytes
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
@@ -810,10 +800,7 @@ pub struct AdminClaimRemaining<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-// ── Init Comp Def contexts \
-// FIX 1: ALL four structs now have /// CHECK: on comp_def_account.
-// The first struct had it; the other three were missing it — that was
-// triggering the #[arcium_program] panic which cascaded into E0433.
+// Init Comp Def contexts
 
 #[init_computation_definition_accounts("place_private_bet_yesno", payer)]
 #[derive(Accounts)]
@@ -895,10 +882,7 @@ pub struct InitRefundYesnoCompDef<'info> {
     pub system_program: Program<'info, System>,
 }
 
-// ── PlacePrivateBetYesno
-// FIX 2: market, lp_position, market_vault, user_token_account,
-//         protocol_treasury, position all boxed.
-// This struct was 7936 bytes — worst offender.
+// PlacePrivateBetYesno
 
 #[queue_computation_accounts("place_private_bet_yesno", payer)]
 #[derive(Accounts)]
@@ -939,8 +923,6 @@ pub struct PlacePrivateBetYesno<'info> {
     pub global_state: Box<Account<'info, GlobalState>>,
     #[account(mut, seeds = [b"market", market.market_id.to_le_bytes().as_ref()], bump = market.bump)]
     pub market: Box<Account<'info, Market>>,
-    #[account(mut, seeds = [b"lp-position", market.key().as_ref(), market.creator.as_ref()], bump = lp_position.bump)]
-    pub lp_position: Box<Account<'info, LPPosition>>,
     #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
     pub market_vault: Box<Account<'info, TokenAccount>>,
     #[account(mut, constraint = user_token_account.owner == user.key(),
@@ -957,8 +939,7 @@ pub struct PlacePrivateBetYesno<'info> {
     pub token_program: Program<'info, Token>,
 }
 
-// ── PlacePrivateBetYesnoCallback ──────────────────────────────────────────────
-// FIX 2: market and position boxed.
+// PlacePrivateBetYesnoCallback
 
 #[callback_accounts("place_private_bet_yesno")]
 #[derive(Accounts)]
@@ -982,7 +963,7 @@ pub struct PlacePrivateBetYesnoCallback<'info> {
     pub position: Box<Account<'info, EncryptedPosition>>, // ← boxed
 }
 
-// ── ResolveMarketYesno ────────────────────────────────────────────────────────
+//  ResolveMarketYesno
 // FIX 2: market boxed.
 
 #[queue_computation_accounts("reveal_market_outcome_yesno", payer)]
@@ -1024,7 +1005,7 @@ pub struct ResolveMarketYesno<'info> {
     pub market: Box<Account<'info, Market>>, // ← boxed
 }
 
-// ── RevealMarketOutcomeYesnoCallback ──────────────────────────────────────────
+//  RevealMarketOutcomeYesnoCallback
 // FIX 2: market boxed.
 
 #[callback_accounts("reveal_market_outcome_yesno")]
@@ -1047,7 +1028,7 @@ pub struct RevealMarketOutcomeYesnoCallback<'info> {
     pub market: Box<Account<'info, Market>>, // ← boxed
 }
 
-// ── ClaimPayoutYesno ──────────────────────────────────────────────────────────
+// ClaimPayoutYesno
 // FIX 2: market and position boxed.
 
 #[queue_computation_accounts("compute_yesno_payout", payer)]
@@ -1091,10 +1072,7 @@ pub struct ClaimPayoutYesno<'info> {
     pub position: Box<Account<'info, EncryptedPosition>>, // ← boxed
 }
 
-// ── ComputeYesnoPayoutCallback ────────────────────────────────────────────────
-// FIX 2: position, market, market_vault, user_token_account all boxed.
-// This was 5632 bytes — second worst offender.
-
+//  ComputeYesnoPayoutCallback
 #[callback_accounts("compute_yesno_payout")]
 #[derive(Accounts)]
 pub struct ComputeYesnoPayoutCallback<'info> {
@@ -1126,9 +1104,7 @@ pub struct ComputeYesnoPayoutCallback<'info> {
     pub system_program: Program<'info, System>,
 }
 
-// ── ClaimRefundYesno ──────────────────────────────────────────────────────────
-// FIX 2: market and position boxed.
-
+//  ClaimRefundYesno
 #[queue_computation_accounts("compute_yesno_refund", payer)]
 #[derive(Accounts)]
 #[instruction(computation_offset: u64)]
@@ -1170,9 +1146,7 @@ pub struct ClaimRefundYesno<'info> {
     pub position: Box<Account<'info, EncryptedPosition>>, // ← boxed
 }
 
-// ── ComputeYesnoRefundCallback ────────────────────────────────────────────────
-// FIX 2: all custom accounts boxed — same as payout callback.
-
+// ComputeYesnoRefundCallback
 #[callback_accounts("compute_yesno_refund")]
 #[derive(Accounts)]
 pub struct ComputeYesnoRefundCallback<'info> {

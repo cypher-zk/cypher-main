@@ -5,143 +5,575 @@ A Solana program built with Anchor + Arcium for encrypted predictions.
 Users place encrypted bets, Arcium circuits compute settlement without
 revealing individual predictions, and winners claim payouts in USDC.
 
-Protocol Account Hierarchy
---------------------------
-  CyperMarket (1 global PDA)
-   └── MarketGroup (1 per question)
-        ├── Bond + BondVault (creator's $10 bond)
-        ├── Market (1 for YesNo/Multi, 3 for Accuracy tiers)
-        │    └── Pool + PoolVault (holds user stakes)
-        │         ├── Position PDAs (1 per user per pool)
-        │         └── SettlementRegistry (1 per pool)
-        └── BondVault
+Architecture Overview
+---------------------
+Protocol Account Hierarchy:
+  GlobalState (1 global PDA, seeds=["global_state"])
+    └── Market (1 per question, seeds=["market", market_id])
+         ├── LPPosition (creator's LP position, seeds=["lp-position", market, creator])
+         ├── MarketVault (SPL token account, seeds=["market_vault", market])
+         └── EncryptedPosition (per user per market, seeds=["position", market, user])
+
+Arcium-Specific Accounts:
+  - MXEAccount: The Multi-Party Execution environment PDA for this program
+  - ComputationDefinitionAccount: Pre-registered circuit bytecode (one per circuit type)
+  - ArciumSignerAccount: PDA that signs for the program within Arcium (seeds=[SIGN_PDA_SEED])
+  - MempoolAccount: Arcium's mempool where pending computations queue
+  - ExecutingPool: Arcium's executing pool where active computations run
+  - ComputationAccount: Represents a single computation job (derived from offset + MXE)
+  - ClusterAccount: Arcium cluster state tracking nodes and rounds
+  - FeePool: Arcium's fee pool for computation costs
+  - ClockAccount: Arcium's clock for computation timing
+  - AddressLookupTable: LUT for efficient address lookup in Arcium
+
+Four Arcium Circuits (Yes/No):
+  - place_private_bet_yesno: Encrypts bet into the pool. Input: Enc<Mxe, YesNoPools> + Enc<Shared, BetInput>. Output: (Enc<Mxe, YesNoPools>, entry_odds: u64).
+  - reveal_market_outcome_yesno: Decrypts pool totals. Input: Enc<Mxe, YesNoPools> + plaintext u8 outcome. Output: (yes_pool: u64, no_pool: u64, payout_ratio: u64).
+  - compute_yesno_payout: Verifies bet + computes payout. Input: Enc<Shared, BetInput> + plaintext outcome + ratio. Output: (payout: u64, is_winner: bool).
+  - compute_yesno_refund: Computes refund for unresolved markets. Input: Enc<Shared, BetInput>. Output: refund_amount: u64.
 
 
-INSTRUCTIONS (step by step)
-===========================
+INSTRUCTIONS — Complete Reference with Accounts
+================================================
 
 1. INITIALIZE (initialize)
-   - Admin creates the global CyperMarket PDA.
-   - Sets protocol_fee_bps, lp_fee_bps, accuracy_platform_fee_bps.
-   - Defines accepted USDC mint and treasury account.
-   - One-time setup before any markets can be created.
+   Signature: initialize(ctx: Context<Initialize>, protocol_fee_rate: u16, lp_fee_rate: u16)
 
-2. REGISTER COMPUTATION DEFINITIONS (init_yesno_comp_def,
-   init_multioutcome_comp_def, init_accuracy_comp_def)
-   - Registers three Arcium circuits on-chain:
-     * settle_yesno       — compares encrypted side {0|1} vs resolved_side
-     * settle_multioutcome — compares encrypted outcome_index vs resolved_outcome
-     * settle_accuracy    — computes |prediction - oracle_value| for each slot
-   - Uploads .arcis circuit bytecode to Arcium cluster.
-   - Necessary once per deployment.
+   Purpose:
+     One-time admin setup. Creates the GlobalState PDA that holds protocol-wide
+     configuration: fee rates, USDC mint, treasury address, and a market counter
+     used to assign unique market IDs. Must be called once before any markets.
 
-3. CREATE MARKET GROUP (create_market_group)
-   - Creator pays $10 USDC bond (locked in BondVault).
-   - Creates a MarketGroup PDA with question, type (YesNo/Multi/Accuracy),
-     category, oracle type, lock/resolve timestamps.
-   - Emits GroupCreated event.
-
-4. CREATE MARKET (create_flat_market / create_tier_market)
-   - YesNo/Multi: one flat market per group (tier_byte=0).
-   - Accuracy: three tier markets (Micro/Standard/Whale at $1/$10/$100).
-
-5. CREATE POOL (create_pool)
-   - Creates a Pool + PoolVault (SPL USDC token account) under a market.
-   - YesNo/Multi: one unified pool per market.
-   - Accuracy: one pool per tier (Micro/Standard/Whale).
-
-6. PLACE BET (place_bet / place_bet_accuracy)
-   - User submits an Arcium-encrypted prediction:
-     * YesNo:        encrypt({ side: 0|1 })
-     * MultiOutcome: encrypt({ outcome_index: 0-3 })
-     * Accuracy:     encrypt({ value: u64 })
-   - Transfers stake from user → pool vault.
-   - Creates a Position PDA with encrypted payload.
-   - Emits BetPlaced event (stake public, prediction stays encrypted).
-
-7. LOCK MARKET (lock_market)
-   - Called after lock_timestamp passes.
-   - Transitions market_group status from Open → Locked.
-   - No more bets accepted. Oracle can now post resolution.
-
-8. POST RESOLUTION (post_resolution)
-   - Oracle authority (Pyth/Switchboard backend or creator for manual)
-     posts the resolved value.
-   - Starts a 1-hour (3600s) dispute window.
-   - Transitions group: Locked → Resolving.
-
-9. INIT SETTLEMENT REGISTRY (init_settlement_registry)
-   - Backend calls after dispute window ends.
-   - Creates SettlementRegistry PDA tracking shard progress.
-   - Calculates total_shards = ceil(participant_count / shard_size).
-   - Marks pool → Settling, group → Settling.
-
-10. QUEUE SETTLEMENT (queue_settlement_yesno / _multioutcome / _accuracy)
-    - Backend queues Arcium computation jobs (one per shard).
-    - Each shard batch: up to 8 positions (YesNo/Multi) or 4 (Accuracy).
-    - Submits resolved value + encrypted positions + shard count to circuit.
-    - Each queue includes a callback instruction (settle_*_callback) that
-      the Arcium cluster executes after computation completes.
-
-11. SETTLEMENT CALLBACK (settle_yesno_callback / _multioutcome_callback /
-    settle_accuracy_callback)
-    - Called by Arcium cluster after computation.
-    - Verifies ZK proof (validates circuit correctness).
-    - For YesNo/Multi: circuit outputs winner_mask [u8; 8].
-    - For Accuracy: circuit outputs errors [u64; 4].
-    - Sends protocol fees → treasury, LP fees → creator via
-      send_settlement_fees() helper.
-    - Increments settled_shards counter.
-    - Emits ShardSettled with encrypted output (decrypted off-chain).
-    - When all shards done: marks Registry → Finalizing, Pool → Settled.
-    - Emits RegistryFinalized event.
-
-12. ACCURACY SEND FEES (accuracy_send_fees)
-    - After all shards settle for Accuracy markets.
-    - Computes platform_fee = loser_count * bet_size * fee_bps / 10000.
-    - Transfers platform fee from pool_vault → treasury.
-
-13. WRITE POSITION PAYOUT (write_position_payout)
-    - Backend or payout writer deciphers ShardSettled events off-chain
-      to determine winner/loser for each position.
-    - Calls this instruction for each position to set payout amount.
-    - Transitions position: Open → Settled.
-    - Emits PayoutWritten event.
-
-14. CLAIM PAYOUT (claim_payout)
-    - User claims their payout after write_position_payout.
-    - Transfers payout amount from pool_vault → user's token account.
-    - Transitions position: Settled → Claimed.
-    - Emits PayoutClaimed event.
-
-15. RETURN BOND (return_bond)
-    - Creator calls after group reaches Settled status.
-    - Returns their $10 USDC bond from bond_vault → creator wallet.
-    - Marks bond → Returned.
-
-16. SLASH BOND (slash_bond)
-    - Anyone can call if creator misses resolve_deadline.
-    - Bond is sent to treasury instead of creator.
-    - MarketGroup marked Voided.
-
-17. CANCEL MARKET (cancel_market)
-    - Creator cancels a market before any bets placed.
-    - Requires pool.participant_count == 0.
-    - Transfers bond back to creator.
-    - Marks bond → Returned, group → Voided.
+   Accounts:
+     admin (Signer, mut)
+       - The transaction signer who pays for GlobalState initialization.
+       - Stored as admin in GlobalState for future admin-only operations.
+     global_state (Box<Account<GlobalState>>, init, payer=admin, seeds=["global_state"])
+       - The protocol's single global config PDA being created here.
+       - Stores fee rates, treasury, accepted mint, admin, and market counter.
+     protocol_treasury (UncheckedAccount)
+       - Wallet address that receives protocol fees from every bet.
+       - Unchecked because any valid Solana address can be a treasury.
+       - Stored in GlobalState for all future fee-sending instructions.
+     accepted_mint (InterfaceAccount<Mint>)
+       - The SPL token mint that all markets use (e.g., USDC).
+       - Stored in GlobalState to validate user deposits across instructions.
+     system_program (Program<System>)
+       - Required by Anchor for the PDA initialization (CPI to create account).
 
 
-LEGEND — Summary of Lifecycle
-------------------------------
+2. REGISTER COMPUTATION DEFINITIONS (init_place_bet_yesno_comp_def,
+   init_reveal_yesno_comp_def, init_payout_yesno_comp_def,
+   init_refund_yesno_comp_def)
+   Signature: fn_name(ctx: Context<...>)
 
-MarketGroup:  Open → Locked → Resolving → Settling → Settled
-              Open → Voided  (cancel before bets)
+   Purpose:
+     Each of the four Arcium circuits must be registered on-chain before they
+     can be used. Registers the .arcis circuit bytecode with the Arcium cluster,
+     creating a ComputationDefinitionAccount PDA that the queue_computation
+     macros reference via a fixed offset constant.
 
-Pool:         Open → Settling → Settled
+   Accounts (identical pattern for all four, differing only in the circuit name
+            passed to the init_computation_definition_accounts macro and the
+            comp_def_offset constant):
+     payer (Signer, mut)
+       - Pays for the computation definition account rent.
+     mxe_account (Box<Account<MXEAccount>>, mut, address=derive_mxe_pda!())
+       - The MXE execution environment PDA for this program.
+       - Must be mutable because registering a comp def modifies MXE state.
+     comp_def_account (UncheckedAccount, mut)
+       - The ComputationDefinition PDA being created/initialized.
+       - Passed as Unchecked because the Arcium program handles validation.
+     address_lookup_table (UncheckedAccount, mut,
+                          address=derive_mxe_lut_pda!(mxe_account.lut_offset_slot))
+       - Arcium's Address Lookup Table for efficient account referencing
+         during computation queueing.
+     lut_program (UncheckedAccount, address=LUT_PROGRAM_ID)
+       - The official Address Lookup Table program ID (constant).
+     arcium_program (Program<Arcium>)
+       - The Arcium program that handles computation definition registration.
+     system_program (Program<System>)
+       - Required for any PDA creation CPIs.
 
-Position:     Open → Settled → Claimed
 
-Bond:         Locked → Returned  (via return_bond)
-              Locked → Slashed   (via slash_bond)
+3. CREATE MARKET (create_market)
+   Signature: create_market(ctx: Context<CreateMarket>, question: String, close_time: i64)
 
-Registry:     InProgress → Finalizing → Complete
+   Purpose:
+     Creator pays a $10 USDC bond (locked in MarketVault) and creates a Market
+     PDA with the question text, close time, and default deadlines. The bond
+     incentivizes honest behavior — if the creator fails to resolve in time,
+     the bond can be slashed. Also initializes an LPPosition to track the
+     creator's LP fees earned from bets on this market.
+
+   Accounts:
+     creator (Signer, mut)
+       - Market creator, pays the $10 bond from their token account.
+       - Stored as both creator and resolver on the Market.
+     global_state (Box<Account<GlobalState>>, mut, seeds=["global_state"])
+       - Read to get the current market_counter for the new market's ID.
+       - Mutable because market_counter is incremented.
+       - Also read to get accepted_mint for validating creator's token.
+     market (Box<Account<Market>>, init, payer=creator, space=MARKET_SPACE,
+             seeds=["market", global_state.market_counter.to_le_bytes()])
+       - The Market PDA being created. Seeds use the monotonically increasing
+         counter so market IDs are sequential and deterministic.
+       - Stores question, timestamps, encrypted pool state, etc.
+     lp_position (Box<Account<LPPosition>>, init, payer=creator,
+                  seeds=["lp-position", market, creator])
+       - Tracks the creator's LP position — liquidity provided (the bond) and
+         fees earned from bets. LP fees accrue here as users place bets.
+     market_vault (Box<Account<TokenAccount>>, init, payer=creator,
+                   token::mint=accepted_mint, token::authority=market_vault,
+                   seeds=["market_vault", market])
+       - SPL token account that holds all USDC for this market: the creator's
+         bond, user bet stakes, and payout funds.
+       - Authority is set to itself (the vault PDA), so transfers out require
+         the vault PDA's signature via PDA seeds.
+     creator_token_account (Box<Account<TokenAccount>>, mut,
+                            constraint: owner=creator, mint=accepted_mint)
+       - Creator's personal USDC token account.
+       - $10 bond is transferred FROM this account TO the market_vault.
+     accepted_mint (InterfaceAccount<Mint>)
+       - Required by Anchor for the token account initialization CPI.
+       - Validates that the vault uses the correct USDC mint.
+     token_program (Program<Token>)
+       - SPL Token program for the bond transfer and vault creation.
+     system_program (Program<System>)
+       - Required by Anchor for PDA and token account initialization.
+
+
+4. CANCEL MARKET (cancel_market)
+   Signature: cancel_market(ctx: Context<CancelMarket>)
+
+   Purpose:
+     Creator can cancel a market before any bets are placed. The $10 bond is
+     returned to the creator. Market must be Active and have 0 total bets.
+     This is the clean exit path — market is effectively voided.
+
+   Accounts:
+     creator (Signer, mut)
+       - Must match market.creator. Receives the bond back.
+     market (Box<Account<Market>>, mut,
+             seeds=["market", market.market_id], constraint: creator==creator)
+       - The market being cancelled. Must be active with total_bets_count == 0.
+     market_vault (Box<Account<TokenAccount>>, mut,
+                   seeds=["market_vault", market])
+       - Holds the creator's bond. PDA signs to transfer bond back to creator.
+     lp_position (Box<Account<LPPosition>>, mut,
+                  seeds=["lp-position", market, creator])
+       - LP position is orphaned on cancel — just needs to exist for PDA
+         derivation validation.
+     creator_token_account (Box<Account<TokenAccount>>, mut,
+                            constraint: owner==creator)
+       - Receives the $10 bond back from market_vault.
+     token_program (Program<Token>)
+       - SPL Token program for the transfer CPI.
+
+
+5. WITHDRAW CREATOR FUNDS (withdraw_creator_funds)
+   Signature: withdraw_creator_funds(ctx: Context<WithdrawCreatorFunds>)
+
+   Purpose:
+     After a market is resolved, the creator can withdraw their $10 bond plus
+     any LP fees earned from user bets. This is the creator's reward for
+     creating and resolving the market honestly.
+
+   Accounts:
+     creator (Signer, mut)
+       - Must match market.creator. Receives bond + LP fees.
+     market (Box<Account<Market>>, mut,
+             seeds=["market", market.market_id], constraint: creator==creator)
+       - Must be in Resolved state. bond_withdrawn is set to true to prevent
+         double-claim.
+     lp_position (Box<Account<LPPosition>>, mut,
+                  seeds=["lp-position", market, creator])
+       - Read to get fees_earned. Marked fees_claimed = true.
+     market_vault (Box<Account<TokenAccount>>, mut,
+                   seeds=["market_vault", market])
+       - PDA signs to transfer bond + LP fees to creator.
+     creator_token_account (Box<Account<TokenAccount>>, mut,
+                            constraint: owner==creator)
+       - Receives the total (bond + LP fees).
+     token_program (Program<Token>)
+       - SPL Token program for the transfer CPI.
+
+
+6. ADMIN CLAIM REMAINING (admin_claim_remaining)
+   Signature: admin_claim_remaining(ctx: Context<AdminClaimRemaining>)
+
+   Purpose:
+     After the refund deadline passes, if there is unclaimed USDC left in the
+     market vault (users who never claimed their payouts or refunds), the
+     admin can sweep the remaining balance to the protocol treasury. This
+     prevents USDC from being permanently locked.
+
+   Accounts:
+     admin (Signer, mut)
+       - Must match global_state.admin. Authenticates as protocol admin.
+     global_state (Box<Account<GlobalState>>,
+                   seeds=["global_state"], constraint: admin==admin)
+       - Read to get protocol_treasury address for the transfer destination.
+     market (Box<Account<Market>>, mut,
+             seeds=["market", market.market_id])
+       - Checked to ensure admin_claimed_remaining is not already true.
+     market_vault (Box<Account<TokenAccount>>, mut,
+                   seeds=["market_vault", market])
+       - Source of remaining funds. PDA signs to release funds.
+     protocol_treasury (Box<Account<TokenAccount>>, mut,
+                        constraint: key==global_state.protocol_treasury)
+       - Destination for the sweep. Must be the treasury stored in GlobalState.
+     token_program (Program<Token>)
+       - SPL Token program for the transfer CPI.
+
+
+7. PLACE PRIVATE BET (place_private_bet_yesno)
+   Signature: place_private_bet_yesno(ctx, computation_offset: u64,
+               bet_amount_usdc: u64, encrypted_amount: [u8;32],
+               encrypted_side: [u8;32], pub_key: [u8;32], nonce: u128)
+
+   Purpose:
+     User places an encrypted bet on a Yes/No market. The bet amount and side
+     are client-side encrypted before submission — the protocol never sees
+     plaintext predictions. The instruction:
+       1. Validates market is active and open.
+       2. Computes protocol fee (sent to treasury) and LP fee (accrued to creator).
+       3. Transfers bet amount from user → market_vault.
+       4. Sends protocol fee from vault → treasury immediately.
+       5. Creates an EncryptedPosition PDA storing encrypted payload.
+       6. Queues an Arcium computation (place_private_bet_yesno circuit)
+          that encrypts the bet into the encrypted pool state.
+       7. The callback updates the market's encrypted_pool_0/1 and mxe_nonce.
+
+   This is the most account-heavy instruction (21 accounts) because:
+     - It needs the standard market accounts (market, vault, positions).
+     - It needs a full set of Arcium accounts for queue_computation.
+     - It needs both user token accounts and protocol treasury for fee handling.
+
+   Accounts (custom Cypher accounts first, then Arcium accounts):
+     user (Signer)
+       - The bettor. Signed to authorize USDC transfer.
+     global_state (Box<Account<GlobalState>>, seeds=["global_state"])
+       - Read-only: provides accepted_mint (validates user's token) and
+         protocol_fee_rate/lp_fee_rate for fee computation.
+       - Also provides protocol_treasury address for fee routing.
+     market (Box<Account<Market>>, mut, seeds=["market", market.market_id])
+       - The target market. Validated for Active state and close_time.
+       - Mutated: encrypted_pool_0, encrypted_pool_1, mxe_nonce incremented
+         in the callback.
+     lp_position (Box<Account<LPPosition>>, mut,
+                  seeds=["lp-position", market, market.creator])
+       - Creator's LP position. fees_earned is incremented by the LP fee
+         portion of this bet.
+     market_vault (Box<Account<TokenAccount>>, mut,
+                   seeds=["market_vault", market])
+       - Receives the user's bet amount. Also used as intermediate for
+         protocol fee transfer (vault → treasury).
+     user_token_account (Box<Account<TokenAccount>>, mut,
+                         constraint: owner==user, mint==accepted_mint)
+       - User's USDC token account. Source of the bet amount.
+     protocol_treasury (Box<Account<TokenAccount>>, mut,
+                        constraint: key==global_state.protocol_treasury)
+       - Receives the protocol fee portion of the bet. Must match the treasury
+         stored in GlobalState.
+     position (Box<Account<EncryptedPosition>>, init, payer=payer,
+               seeds=["position", market, user])
+       - The user's position PDA being created. Stores encrypted_amount,
+         encrypted_side, user_pubkey, nonce. Written in callback with entry_odds.
+     token_program (Program<Token>)
+       - SPL Token program for USDC transfers.
+
+     payer (Signer, mut) — Arcium fee payer
+       - Pays for Arcium computation costs and the position PDA rent.
+       - Often the same as the user (or a relayer).
+     sign_pda_account (Box<Account<ArciumSignerAccount>>, init_if_needed,
+                       seeds=[SIGN_PDA_SEED], address=derive_sign_pda!())
+       - The program's signer PDA within Arcium. Space=9 bytes (just a bump).
+       - Allows the program to authorize actions within the Arcium cluster.
+     mxe_account (Box<Account<MXEAccount>>, address=derive_mxe_pda!())
+       - The MXE execution environment — context for all Arcium computations.
+     mempool_account (UncheckedAccount, mut, address=derive_mempool_pda!(mxe))
+       - Arcium's computation mempool. The computation is queued here.
+     executing_pool (UncheckedAccount, mut, address=derive_execpool_pda!(mxe))
+       - Arcium's executing pool. Tracks active computations.
+     computation_account (UncheckedAccount, mut,
+                          address=derive_comp_pda!(computation_offset, mxe))
+       - The specific computation slot for this bet. Derived from the
+         computation_offset (starting index for non-overlapping computation IDs)
+         and the MXE account. The Arcium program uses this to track state.
+     comp_def_account (Box<Account<ComputationDefinitionAccount>>,
+                       address=derive_comp_def_pda!(COMP_DEF_OFFSET_PLACE_BET_YESNO))
+       - Pre-registered computation definition for the place_private_bet_yesno
+         circuit. The Arcium cluster reads this to know which circuit to execute.
+     cluster_account (Box<Account<Cluster>>, mut,
+                      address=derive_cluster_pda!(mxe))
+       - The Arcium cluster's state — tracks available nodes, rounds, etc.
+     pool_account (Box<Account<FeePool>>, mut,
+                   address=ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)
+       - Arcium's fee pool — pays for computation node resources.
+     clock_account (Box<Account<ClockAccount>>, mut,
+                    address=ARCIUM_CLOCK_ACCOUNT_ADDRESS)
+       - Arcium's timing clock — ensures computations respect timing constraints.
+     system_program (Program<System>)
+       - Required for sign_pda_account and position PDA initialization.
+     arcium_program (Program<Arcium>)
+       - The Arcium program — receives the queue_computation CPI.
+
+
+8. PLACE BET CALLBACK (place_private_bet_yesno_callback)
+   #[arcium_callback(encrypted_ix = "place_private_bet_yesno")]
+
+   Purpose:
+     Called by the Arcium cluster after the place_private_bet_yesno circuit
+     completes. Verifies the ZK proof from the circuit, then:
+       - Updates market.encrypted_pool_0/1 with the new encrypted pool state.
+       - Updates market.mxe_nonce (nonce incremented by circuit).
+       - Increments market.total_bets_count.
+       - Writes entry_odds to the user's EncryptedPosition.
+
+   Accounts:
+     arcium_program (Program<Arcium>)
+       - The Arcium program that invoked this callback.
+     comp_def_account (Account<ComputationDefinitionAccount>,
+                       address=derive_comp_def_pda!(COMP_DEF_OFFSET_PLACE_BET_YESNO))
+       - Verifies this callback matches the correct circuit definition.
+     mxe_account (Account<MXEAccount>, address=derive_mxe_pda!())
+       - The MXE environment that executed the computation.
+     computation_account (UncheckedAccount)
+       - The computation result — verified against cluster for authenticity.
+     cluster_account (Account<Cluster>, address=derive_cluster_pda!(mxe))
+       - Used to verify the computation output signature (ZK proof verification).
+     instructions_sysvar (UncheckedAccount, address=Solana Instructions Sysvar)
+       - Solana sysvar needed for callback introspection by Arcium.
+     market (Box<Account<Market>>, mut) — Custom
+       - Updated with new encrypted pool state and bet count.
+       - No seed constraint because the callback is trustless — Arcium passes
+         the exact accounts from the original queue_computation call.
+     position (Box<Account<EncryptedPosition>>, mut) — Custom
+       - Updated with entry_odds computed by the circuit.
+
+
+9. RESOLVE MARKET (resolve_market_yesno)
+   Signature: resolve_market_yesno(ctx, computation_offset: u64, outcome_value: u8)
+
+   Purpose:
+     The designated resolver (typically the market creator or an oracle) submits
+     the resolved outcome. The outcome is stored as pending_outcome. Then an
+     Arcium computation is queued (reveal_market_outcome_yesno circuit) that
+     decrypts the encrypted pool totals using the outcome, computing:
+       - The true yes/no pool amounts.
+       - The payout ratio (total_pool / winner_pool).
+     The callback confirms the outcome and transitions market to Resolved.
+
+   Accounts (13 total — fewer than place_bet because no user/position/fee accounts):
+     resolver (Signer)
+       - Must match market.resolver. Authenticated to resolve this market.
+     market (Box<Account<Market>>, mut,
+             seeds=["market", market.market_id],
+             constraint: market.resolver == resolver)
+       - Must be Active and past close_time. pending_outcome is written here.
+
+     payer (Signer, mut) — Arcium fee payer
+     sign_pda_account (init_if_needed, seeds=[SIGN_PDA_SEED])
+     mxe_account (address=derive_mxe_pda!())
+     mempool_account (UncheckedAccount, mut, derive_mempool_pda)
+     executing_pool (UncheckedAccount, mut, derive_execpool_pda)
+     computation_account (UncheckedAccount, mut, derive_comp_pda(offset, mxe))
+     comp_def_account (derive_comp_def_pda(REVEAL_YESNO))
+     cluster_account (mut, derive_cluster_pda(mxe))
+     pool_account (mut, ARCIUM_FEE_POOL)
+     clock_account (mut, ARCIUM_CLOCK)
+     system_program
+     arcium_program
+
+   (Arcium accounts have the same purpose as in place_bet — see #7 for details.)
+
+
+10. REVEAL OUTCOME CALLBACK (reveal_market_outcome_yesno_callback)
+    #[arcium_callback(encrypted_ix = "reveal_market_outcome_yesno")]
+
+    Purpose:
+      Called by Arcium after the reveal circuit completes. Verifies the ZK
+      proof, then:
+        - Writes revealed_pool_0 (yes total) and revealed_pool_1 (no total).
+        - Writes payout_ratio (scaled by 1e9).
+        - Sets market.state = Resolved (2).
+        - Confirms market.outcome = market.pending_outcome.
+        - Sets resolution_time, claim_deadline, refund_deadline timestamps.
+
+    Accounts:
+      arcium_program, comp_def_account, mxe_account, computation_account,
+      cluster_account, instructions_sysvar
+        - Same Arcium verification pattern as other callbacks.
+      market (Box<Account<Market>>, mut) — Custom
+        - The only custom account. Updated with resolved pool totals, state,
+          outcome, and all deadline timestamps.
+
+
+11. CLAIM PAYOUT (claim_payout_yesno)
+    Signature: claim_payout_yesno(ctx, computation_offset: u64)
+
+    Purpose:
+      A winning user claims their payout after the market is resolved. Queues
+      an Arcium computation (compute_yesno_payout circuit) that decrypts the
+      user's encrypted position, checks if it matches the winning outcome,
+      and computes the payout using the payout_ratio. The callback:
+        - Marks position as claimed.
+        - Transfers payout from market_vault → user's token account.
+        - Emits PayoutClaimedEvent.
+
+    Accounts (15 total):
+      user (Signer)
+        - Must match position.user. Authenticated to claim this payout.
+      market (Box<Account<Market>>, seeds=["market", market.market_id])
+        - Must be Resolved. Read for payout_ratio, outcome, claim_deadline.
+        - Not mutated in queue phase — mutation happens in callback.
+      position (Box<Account<EncryptedPosition>>, mut,
+                seeds=["position", market, user], constraint: position.user == user)
+        - Must be unclaimed. encrypted_amount, encrypted_side, user_pubkey, nonce
+          are read and passed as encrypted inputs to the Arcium circuit.
+
+      payer, sign_pda_account, mxe_account, mempool_account, executing_pool,
+      computation_account, comp_def_account (PAYOUT_YESNO offset),
+      cluster_account, pool_account, clock_account, system_program, arcium_program
+        - Standard Arcium queue_computation accounts (see #7 for details).
+        - comp_def_account uses COMP_DEF_OFFSET_PAYOUT_YESNO.
+        - No token accounts needed in queue phase (transfers happen in callback).
+
+
+12. PAYOUT CALLBACK (compute_yesno_payout_callback)
+    #[arcium_callback(encrypted_ix = "compute_yesno_payout")]
+
+    Purpose:
+      Called by Arcium after the payout circuit completes. Verifies the ZK
+      proof, then:
+        - Reads payout_amount and is_winner from circuit output.
+        - If is_winner and payout > 0: transfers from market_vault → user's
+          token account using PDA signature.
+        - Increments market.total_payouts_claimed.
+        - Marks position.claimed = true.
+
+    Accounts:
+      arcium_program, comp_def_account, mxe_account, computation_account,
+      cluster_account, instructions_sysvar
+        - Standard Arcium callback verification accounts.
+      position (Box<Account<EncryptedPosition>>, mut) — Custom
+        - Marked claimed = true.
+      user (UncheckedAccount, mut) — Custom
+        - The user's wallet (just a Pubkey for event emission — may not sign).
+        - Unchecked because it's only used as an identifier and token account
+          owner, not deserialized.
+      market (Box<Account<Market>>, mut) — Custom
+        - total_payouts_claimed is incremented.
+        - vault_bump is read for PDA signing.
+      market_vault (Box<Account<TokenAccount>>, mut) — Custom
+        - Source of payout funds. PDA signs to authorize the transfer.
+      user_token_account (Box<Account<TokenAccount>>, mut) — Custom
+        - Destination for the payout. Receives USDC.
+      token_program (Program<Token>) — Custom
+        - SPL Token program for the transfer CPI.
+      system_program (Program<System>) — Custom
+        - Available for any system-level operations.
+
+
+13. CLAIM REFUND (claim_refund_yesno)
+    Signature: claim_refund_yesno(ctx, computation_offset: u64)
+
+    Purpose:
+      If the market's resolution deadline passes without the market being
+      resolved (i.e., the creator failed to resolve in time), any bettor can
+      claim a refund of their stake. Queues an Arcium computation
+      (compute_yesno_refund circuit) that decrypts the user's encrypted
+      position and returns the bet amount. The callback transfers the refund
+      from market_vault → user.
+
+    Accounts (15 total — identical structure to claim_payout_yesno):
+      user, market, position — same as claim_payout
+        - Difference: market state must NOT be Resolved, and time must be past
+          resolution_deadline.
+      payer, sign_pda_account, mxe_account, mempool_account, executing_pool,
+      computation_account, comp_def_account (REFUND_YESNO offset),
+      cluster_account, pool_account, clock_account, system_program, arcium_program
+        - Standard Arcium queue accounts (see #7, #11).
+        - comp_def_account uses COMP_DEF_OFFSET_REFUND_YESNO.
+
+
+14. REFUND CALLBACK (compute_yesno_refund_callback)
+    #[arcium_callback(encrypted_ix = "compute_yesno_refund")]
+
+    Purpose:
+      Called by Arcium after the refund circuit completes. Verifies ZK proof,
+      reads refund_amount from circuit output, transfers from vault → user.
+      Marks position.claimed = true.
+
+    Accounts (identical to payout callback #12):
+      arcium_program, comp_def_account, mxe_account, computation_account,
+      cluster_account, instructions_sysvar
+        - Standard Arcium verification.
+      position, user, market, market_vault, user_token_account, token_program,
+      system_program
+        - Same token transfer pattern as payout callback.
+        - Difference: transfers refund_amount instead of payout_amount.
+
+
+Account Usage Patterns — Why So Many Accounts?
+===============================================
+
+The Arcium integration is the primary reason for the high account counts.
+There are three distinct account categories:
+
+A) Cypher Protocol Accounts (market, vault, positions, fees)
+   - These carry the core business logic: market state, user positions, fees.
+   - Seed-constrained to prevent account substitution attacks.
+   - Market accounts use seeds=["market", market_id] so anyone can derive them.
+   - Positions use seeds=["position", market, user] for per-user uniqueness.
+
+B) Arcium Computation Accounts (MXE, mempool, exec pool, comp, cluster, etc.)
+   - Required whenever queue_computation() is called.
+   - Each represents a component of the Arcium execution environment.
+   - The comp_def_account links to a specific pre-registered circuit.
+   - The computation_account is a unique slot derived from (offset, MXE) to
+     prevent computation ID collisions.
+   - The sign_pda_account gives the program authority within Arcium.
+
+C) Token Handling Accounts (vaults, user token accounts, treasury)
+   - Required for USDC transfers via SPL Token CPI.
+   - The market_vault PDA is both the escrow (holds all funds) and the
+     signing authority (releases funds via PDA seeds).
+   - Protocol treasury is validated against GlobalState to prevent theft.
+
+Why PDA seeds matter:
+  - Seeds prevent "rogue account" attacks — an attacker cannot substitute a
+    different market or position because Anchor derives and verifies the PDA
+    address from known seeds.
+  - Example: market_vault seeds=["market_vault", market] means the vault is
+    cryptographically bound to its market. Only that market's PDA can sign
+    for that vault.
+
+Why callbacks use fewer constraints:
+  - Callback accounts (e.g., PlacePrivateBetYesnoCallback) are not seed-
+    constrained because they are passed by the Arcium cluster from the
+    original queue_computation invocation. The cluster ensures the exact
+    same accounts are used in the callback. Seed verification happens at
+    queue time, not callback time.
+
+
+Lifecycle Summary
+=================
+
+Market:     Created → Active → Resolved → (payouts/refunds claimed)
+            Active → Cancelled (if 0 bets)
+            Active → Unresolved (deadline passed) → refunds
+
+Position:   Created (at bet) → Claimed (at payout/refund)
+
+LPPosition: Created (at market) → fees accrue → Withdrawn (after resolution)
+
+Bond:       Paid ($10 USDC at market creation) → Returned (after resolution)
+                                                     → Forfeited (if unresolved)
+
+Deadlines (set at market creation / resolution):
+  close_time              — when betting stops
+  resolution_deadline     — = close_time + 7 days (creator must resolve by)
+  claim_deadline          — = resolution_time + 14 days
+  refund_deadline         — = resolution_time + 14 days + 14 days
