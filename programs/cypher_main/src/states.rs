@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 
 // CYPHER — states.rs   (YesNo + MultiOutcome)
 
-// ── SPACE CONSTANTS
+// SPACE CONSTANTS
 
 pub const GLOBAL_STATE_SPACE: usize = 8   // discriminator
     + 8   // market_counter: u64
@@ -25,13 +25,13 @@ pub const MARKET_SPACE: usize = 8    // discriminator
     + 8   // creator_bond: u64
     + 1   // bond_withdrawn: bool
     + 8   // total_bets_count: u64
-    // ── encrypted pools (MXE-owned ciphertexts) ──
+    //  encrypted pools (MXE-owned ciphertexts) 
     + 32  // encrypted_yes_pool / encrypted_pool_0: [u8;32]
     + 32  // encrypted_no_pool  / encrypted_pool_1: [u8;32]
     + 32  // encrypted_pool_2: [u8;32]  (MultiOutcome only, zeroed for YesNo)
     + 32  // encrypted_pool_3: [u8;32]  (MultiOutcome only, zeroed for YesNo)
     + 16  // mxe_nonce: u128
-    // ── revealed after resolution ──
+    //  revealed after resolution 
     + 8   // revealed_pool_0: u64
     + 8   // revealed_pool_1: u64
     + 8   // revealed_pool_2: u64
@@ -155,7 +155,7 @@ pub struct Market {
     pub encrypted_pool_3: [u8; 32],
     pub mxe_nonce: u128,
 
-    // ── Revealed after resolution — written by reveal callback ────────────
+    //  Revealed after resolution — written by reveal callback
     pub revealed_pool_0: u64,
     pub revealed_pool_1: u64,
     pub revealed_pool_2: u64,
@@ -223,9 +223,7 @@ pub struct LPPosition {
     pub bump: u8,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 //  EVENTS
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[event]
 pub struct MarketCreatedEvent {
@@ -288,9 +286,7 @@ pub struct CreatorWithdrawnEvent {
     pub total: u64,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 //  ERRORS
-// ─────────────────────────────────────────────────────────────────────────────
 
 #[error_code]
 pub enum CypherError {
