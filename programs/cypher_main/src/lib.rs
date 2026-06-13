@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use anchor_spl::token_interface::Mint;
 use arcium_anchor::prelude::*;
+use arcium_client::idl::arcium::types::CallbackAccount as ArciumCallbackAccount;
 
 pub mod states;
 use states::*;
@@ -358,7 +359,6 @@ pub mod cypher {
         let args = ArgBuilder::new()
             .plaintext_u128(m.mxe_nonce)
             .encrypted_u64(m.encrypted_pool_0)
-            .plaintext_u128(m.mxe_nonce)
             .encrypted_u64(m.encrypted_pool_1)
             .x25519_pubkey(pub_key)
             .plaintext_u128(nonce)
@@ -373,7 +373,10 @@ pub mod cypher {
             vec![PlacePrivateBetYesnoCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
-                &[],
+                &[
+                    ArciumCallbackAccount { pubkey: ctx.accounts.market.key(), is_writable: true },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.position.key(), is_writable: true },
+                ],
             )?],
             1,
             0,
@@ -444,7 +447,6 @@ pub mod cypher {
         let args = ArgBuilder::new()
             .plaintext_u128(m.mxe_nonce)
             .encrypted_u64(m.encrypted_pool_0)
-            .plaintext_u128(m.mxe_nonce)
             .encrypted_u64(m.encrypted_pool_1)
             .plaintext_u8(outcome_value)
             .build();
@@ -456,7 +458,9 @@ pub mod cypher {
             vec![RevealMarketOutcomeYesnoCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
-                &[],
+                &[
+                    ArciumCallbackAccount { pubkey: ctx.accounts.market.key(), is_writable: true },
+                ],
             )?],
             1,
             0,
@@ -543,7 +547,15 @@ pub mod cypher {
             vec![ComputeYesnoPayoutCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
-                &[],
+                &[
+                    ArciumCallbackAccount { pubkey: ctx.accounts.position.key(), is_writable: true },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.user.key(), is_writable: false },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.market.key(), is_writable: true },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.market_vault.key(), is_writable: true },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.user_token_account.key(), is_writable: true },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.token_program.key(), is_writable: false },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.system_program.key(), is_writable: false },
+                ],
             )?],
             1,
             0,
@@ -635,7 +647,15 @@ pub mod cypher {
             vec![ComputeYesnoRefundCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
-                &[],
+                &[
+                    ArciumCallbackAccount { pubkey: ctx.accounts.position.key(), is_writable: true },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.user.key(), is_writable: false },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.market.key(), is_writable: true },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.market_vault.key(), is_writable: true },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.user_token_account.key(), is_writable: true },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.token_program.key(), is_writable: false },
+                    ArciumCallbackAccount { pubkey: ctx.accounts.system_program.key(), is_writable: false },
+                ],
             )?],
             1,
             0,
@@ -1074,6 +1094,11 @@ pub struct ClaimPayoutYesno<'info> {
         constraint = position.user == user.key(),
     )]
     pub position: Box<Account<'info, EncryptedPosition>>, // ← boxed
+    #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
+    pub market_vault: Box<Account<'info, TokenAccount>>,
+    #[account(mut, constraint = user_token_account.owner == user.key())]
+    pub user_token_account: Box<Account<'info, TokenAccount>>,
+    pub token_program: Program<'info, Token>,
 }
 
 //  ComputeYesnoPayoutCallback
@@ -1095,8 +1120,7 @@ pub struct ComputeYesnoPayoutCallback<'info> {
     // Custom
     #[account(mut)]
     pub position: Box<Account<'info, EncryptedPosition>>, // ← boxed
-    /// CHECK: user wallet receiving payout
-    #[account(mut)]
+    /// CHECK: user wallet for emit event
     pub user: UncheckedAccount<'info>,
     #[account(mut)]
     pub market: Box<Account<'info, Market>>, // ← boxed
@@ -1148,6 +1172,11 @@ pub struct ClaimRefundYesno<'info> {
         constraint = position.user == user.key(),
     )]
     pub position: Box<Account<'info, EncryptedPosition>>, // ← boxed
+    #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
+    pub market_vault: Box<Account<'info, TokenAccount>>,
+    #[account(mut, constraint = user_token_account.owner == user.key())]
+    pub user_token_account: Box<Account<'info, TokenAccount>>,
+    pub token_program: Program<'info, Token>,
 }
 
 // ComputeYesnoRefundCallback
@@ -1169,8 +1198,7 @@ pub struct ComputeYesnoRefundCallback<'info> {
     // Custom
     #[account(mut)]
     pub position: Box<Account<'info, EncryptedPosition>>, // ← boxed
-    /// CHECK: user wallet receiving refund
-    #[account(mut)]
+    /// CHECK: user wallet for emit event
     pub user: UncheckedAccount<'info>,
     #[account(mut)]
     pub market: Box<Account<'info, Market>>, // ← boxed

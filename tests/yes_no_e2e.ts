@@ -1,0 +1,1047 @@
+import BN from "bn.js";
+import * as anchor from "@anchor-lang/core";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  LAMPORTS_PER_SOL,
+} from "@solana/web3.js";
+import {
+  TOKEN_PROGRAM_ID,
+  getAccount,
+  createAccount,
+  createMint,
+  mintTo,
+} from "@solana/spl-token";
+import {
+  getArciumEnv,
+  getArciumProgramId,
+  getCompDefAccOffset,
+  getCompDefAccAddress,
+  getMXEAccAddress,
+  getMempoolAccAddress,
+  getExecutingPoolAccAddress,
+  getComputationAccAddress,
+  getClusterAccAddress,
+  getFeePoolAccAddress,
+  getClockAccAddress,
+  getLookupTableAddress,
+  getMXEPublicKey,
+  x25519,
+  CSplRescueCipher,
+  deserializeLE,
+  awaitComputationFinalization,
+  uploadCircuit,
+} from "@arcium-hq/client";
+import * as fs from "fs";
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PROGRAM_ID = new PublicKey("F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc");
+const ARCIUM_PROGRAM_ID = getArciumProgramId();
+const ARCIUM_ENV = (() => {
+  try {
+    return getArciumEnv();
+  } catch {
+    return null;
+  }
+})();
+
+const SIGN_PDA_SEED = Buffer.from("ArciumSignerAccount");
+const BET_AMOUNT = 5_000_000; // 5 USDC per bettor
+const CREATOR_BOND = 10_000_000; // 10 USDC bond
+const PROTOCOL_FEE_BPS = 50; // 0.5%
+const LP_FEE_BPS = 150; // 1.5%
+const USDC_DECIMALS = 6;
+const POLL_INTERVAL_MS = 2_000;
+const CALLBACK_TIMEOUT_MS = 60_000;
+
+const COMP_DEFS = [
+  { circuit: "place_private_bet_yesno", method: "initPlaceBetYesnoCompDef" as any },
+  { circuit: "reveal_market_outcome_yesno", method: "initRevealYesnoCompDef" as any },
+  { circuit: "compute_yesno_payout", method: "initPayoutYesnoCompDef" as any },
+  { circuit: "compute_yesno_refund", method: "initRefundYesnoCompDef" as any },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PDA Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function findGlobalStatePda(): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("global_state")],
+    PROGRAM_ID,
+  )[0];
+}
+
+function findMarketPda(marketId: anchor.BN): PublicKey {
+  const buf = Buffer.alloc(8);
+  buf.writeBigUInt64LE(BigInt(marketId.toString()));
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("market"), buf],
+    PROGRAM_ID,
+  )[0];
+}
+
+function findMarketVaultPda(market: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("market_vault"), market.toBuffer()],
+    PROGRAM_ID,
+  )[0];
+}
+
+function findLpPositionPda(market: PublicKey, creator: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("lp-position"), market.toBuffer(), creator.toBuffer()],
+    PROGRAM_ID,
+  )[0];
+}
+
+function findPositionPda(market: PublicKey, user: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("position"), market.toBuffer(), user.toBuffer()],
+    PROGRAM_ID,
+  )[0];
+}
+
+function findSignPdaAccount(): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [SIGN_PDA_SEED],
+    PROGRAM_ID,
+  )[0];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function waitUntil(ts: number, label: string) {
+  const now = Math.floor(Date.now() / 1000);
+  if (now >= ts) return;
+  const delta = ts - now;
+  console.log(`  ⏳ Waiting ${delta}s (${label})...`);
+  const start = Date.now();
+  while (Date.now() - start < delta * 1000) {
+    await sleep(1_000);
+  }
+}
+
+function fmtUsdc(lamports: number | bigint): string {
+  return (Number(lamports) / 10 ** USDC_DECIMALS).toFixed(2);
+}
+
+// Polls getMXEPublicKey until the MXE cluster has completed key agreement.
+async function waitForMxeReady(
+  provider: anchor.AnchorProvider,
+  timeoutMs = 240_000,
+): Promise<Uint8Array> {
+  const deadline = Date.now() + timeoutMs;
+  console.log(`  Waiting for MXE keys (up to ${timeoutMs / 1000}s)...`);
+  while (Date.now() < deadline) {
+    try {
+      const key = await getMXEPublicKey(provider, PROGRAM_ID);
+      if (key) {
+        console.log(`  ✓ MXE public key ready`);
+        return key;
+      }
+    } catch {}
+    await sleep(5_000);
+    console.log(`  ⏳ MXE keys not set yet, retrying...`);
+  }
+  throw new Error("MXE keys never became available — is the Arcium cluster running?");
+}
+
+// Encrypts amount (u64) + side (u8) with x25519 ECDH + CSplRescueCipher (Enc<Shared>).
+// Returns the values to pass directly to place_private_bet_yesno.
+function encryptBetInput(
+  netAmount: number,
+  side: number, // 0 or 1
+  mxePubKey: Uint8Array,
+): {
+  encryptedAmount: number[];
+  encryptedSide: number[];
+  pubKey: number[];
+  nonce: BN; // u128 as BN for Anchor
+  nonceBytes: Uint8Array; // 16-byte LE nonce for the cipher
+} {
+  const userPrivKey = crypto.getRandomValues(new Uint8Array(32));
+  const userPubKey = x25519.getPublicKey(userPrivKey);
+  const sharedSecret = x25519.getSharedSecret(userPrivKey, mxePubKey);
+
+  const cipher = new CSplRescueCipher(sharedSecret);
+
+  // 16 random bytes as LE nonce
+  const nonceBytes = new Uint8Array(16);
+  crypto.getRandomValues(nonceBytes);
+
+  // encrypt([amount_as_field_elem, side_as_field_elem], nonce)
+  // returns number[][] — each inner array is 32 bytes
+  const encrypted = cipher.encrypt(
+    [BigInt(netAmount), BigInt(side)],
+    nonceBytes,
+  );
+
+  // nonce as BN (u128 LE)
+  const nonceBigInt = deserializeLE(nonceBytes);
+  const nonceBN = new BN(nonceBigInt.toString());
+
+  return {
+    encryptedAmount: encrypted[0],
+    encryptedSide: encrypted[1],
+    pubKey: Array.from(userPubKey),
+    nonce: nonceBN,
+    nonceBytes,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Test Suite
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("yes_no_e2e", function () {
+  this.timeout(900_000); // 15 min for the full lifecycle
+
+  // Shared state
+  let provider: anchor.AnchorProvider;
+  let connection: Connection;
+  let program: any;
+  let payer: Keypair;
+  let usdcMint: PublicKey;
+  let treasury: PublicKey;
+  let globalStatePda: PublicKey;
+  let marketPda: PublicKey;
+  let marketVaultPda: PublicKey;
+  let lpPositionPda: PublicKey;
+  let creatorTokenAccount: PublicKey;
+  let closeTime: number;
+  let marketId: anchor.BN;
+  let marketIndex: number;
+
+  const users: {
+    keypair: Keypair;
+    usdcAccount: PublicKey;
+    side: number; // 1 = YES, 0 = NO
+    positionPda: PublicKey;
+  }[] = [];
+
+  // ── Step 1: Initialize + Comp Defs ──────────────────────────────────────────
+
+  it("Step 1: initialize protocol + register 4 Arcium circuits", async () => {
+    console.log("\n═══════════════════════════════════════════════");
+    console.log("  STEP 1: INITIALIZE + COMP DEFS");
+    console.log("═══════════════════════════════════════════════\n");
+
+    connection = new Connection(
+      (anchor.AnchorProvider.env() as any).connection.rpcEndpoint,
+      "confirmed",
+    );
+
+    const wallet = anchor.AnchorProvider.env().wallet;
+    provider = new anchor.AnchorProvider(connection, wallet, {
+      commitment: "confirmed",
+    });
+    anchor.setProvider(provider);
+
+    const rawIdl = JSON.parse(
+      fs.readFileSync("target/idl/cypher.json", "utf-8"),
+    );
+    program = new anchor.Program(rawIdl, provider) as any;
+
+    payer = (wallet as any).payer as Keypair;
+    console.log(`  Payer:       ${payer.publicKey.toBase58()}`);
+    console.log(`  Program ID:  ${PROGRAM_ID.toBase58()}`);
+    console.log(`  Arcium ID:   ${ARCIUM_PROGRAM_ID.toBase58()}`);
+
+    // ── Initialize ──────────────────────────────────────────────────────────
+
+    globalStatePda = findGlobalStatePda();
+    const existing = await connection.getAccountInfo(globalStatePda);
+
+    if (existing) {
+      console.log(`  ℹ GlobalState already exists, reading config...`);
+      const gs: any = await program.account.globalState.fetch(globalStatePda);
+      usdcMint = gs.acceptedMint;
+      treasury = gs.protocolTreasury;
+      marketIndex = Number(gs.marketCounter.toString());
+      console.log(`  USDC mint:   ${usdcMint.toBase58()}`);
+      console.log(`  Treasury:    ${treasury.toBase58()}`);
+      console.log(`  Market counter: ${marketIndex}`);
+    } else {
+      console.log(`  Creating fresh USDC mint...`);
+
+      // Create USDC mint
+      usdcMint = await createMint(
+        connection,
+        payer,
+        payer.publicKey,
+        null,
+        6,
+      );
+      console.log(`  Mint:        ${usdcMint.toBase58()}`);
+
+      // Create treasury token account
+      const treasuryKeypair = Keypair.generate();
+      treasury = await createAccount(
+        connection,
+        payer,
+        usdcMint,
+        payer.publicKey,
+        treasuryKeypair,
+      );
+      console.log(`  Treasury:    ${treasury.toBase58()}`);
+
+      // Create creator USDC account + fund it
+      const creatorKeypair = Keypair.generate();
+      creatorTokenAccount = await createAccount(
+        connection,
+        payer,
+        usdcMint,
+        payer.publicKey,
+        creatorKeypair,
+      );
+      await mintTo(
+        connection,
+        payer,
+        usdcMint,
+        creatorTokenAccount,
+        payer,
+        1_000_000_000, // 1000 USDC
+      );
+
+      const sig = await program.methods
+        .initialize(PROTOCOL_FEE_BPS, LP_FEE_BPS)
+        .accountsPartial({
+          admin: payer.publicKey,
+          globalState: globalStatePda,
+          protocolTreasury: treasury,
+          acceptedMint: usdcMint,
+          systemProgram: SystemProgram.programId,
+        })
+        .rpc({ commitment: "confirmed" });
+      console.log(`  ✓ initialize: ${sig}`);
+
+      marketIndex = 0;
+    }
+
+    // Create creator token account if not done above
+    if (!creatorTokenAccount) {
+      const gs: any = await program.account.globalState.fetch(globalStatePda);
+      if (usdcMint.equals(gs.acceptedMint)) {
+        const kp = Keypair.generate();
+        creatorTokenAccount = await createAccount(
+          connection,
+          payer,
+          usdcMint,
+          payer.publicKey,
+          kp,
+        );
+        await mintTo(
+          connection,
+          payer,
+          usdcMint,
+          creatorTokenAccount,
+          payer,
+          1_000_000_000,
+        );
+      }
+    }
+
+    // ── Register 4 Computation Definitions ────────────────────────────────
+
+    console.log(`\n  Registering 4 Arcium circuits...`);
+
+    for (const cd of COMP_DEFS) {
+      const offset = Buffer.from(getCompDefAccOffset(cd.circuit)).readUInt32LE();
+      const compDefPda = getCompDefAccAddress(PROGRAM_ID, offset);
+      const mxeAccount = getMXEAccAddress(PROGRAM_ID);
+
+      const mxeInfo = await connection.getAccountInfo(mxeAccount);
+      if (!mxeInfo) {
+        console.log(
+          `  ⚠ MXE account not found for ${cd.circuit}. ` +
+            `Skipping comp def registration.`,
+        );
+        continue;
+      }
+      const lutAddress = getLookupTableAddress(PROGRAM_ID, new BN(3));
+
+      try {
+        const initSig = await (program.methods as any)
+          [cd.method]()
+          .accountsPartial({
+            payer: payer.publicKey,
+            mxeAccount,
+            compDefAccount: compDefPda,
+            addressLookupTable: lutAddress,
+          })
+          .signers([payer])
+          .rpc({ commitment: "confirmed" });
+        console.log(`  ✓ ${cd.circuit}: init ${initSig}`);
+      } catch (e: any) {
+        // Account may already be registered from a previous run
+        console.log(`  ℹ ${cd.circuit} init: ${e.message?.slice(0, 80)}`);
+      }
+
+      // Finalize comp def: arcium test pre-loads raw circuit accounts as genesis
+      // accounts; uploadCircuit detects them, skips the upload, and calls
+      // finalizeComputationDefinition to move state OnchainPending → OnchainFinalized.
+      try {
+        const uploadSigs = await uploadCircuit(
+          provider,
+          cd.circuit,
+          PROGRAM_ID,
+          new Uint8Array(1), // triggers numAccs=1; pre-loaded account passes size check
+        );
+        if (uploadSigs.length > 0) {
+          console.log(`  ✓ ${cd.circuit}: finalized (${uploadSigs.length} txs)`);
+        } else {
+          console.log(`  ℹ ${cd.circuit}: already finalized`);
+        }
+      } catch (e: any) {
+        console.log(`  ℹ ${cd.circuit} upload: ${e.message?.slice(0, 80)}`);
+      }
+
+      await sleep(500);
+    }
+
+    console.log(`\n  ✓ Step 1 complete.`);
+  });
+
+  // ── Step 2: Create Market ──────────────────────────────────────────────────
+
+  it("Step 2: create_market", async () => {
+    console.log("\n═══════════════════════════════════════════════");
+    console.log("  STEP 2: CREATE MARKET");
+    console.log("═══════════════════════════════════════════════\n");
+
+    const gs: any = await program.account.globalState.fetch(globalStatePda);
+    marketIndex = Number(gs.marketCounter.toString());
+
+    marketId = new BN(marketIndex);
+    marketPda = findMarketPda(marketId);
+
+    closeTime = Math.floor(Date.now() / 1000) + 65; // ~1 minute
+
+    marketVaultPda = findMarketVaultPda(marketPda);
+    lpPositionPda = findLpPositionPda(marketPda, payer.publicKey);
+
+    console.log(`  Question:    "Will SOL hit $200?"`);
+    console.log(`  Market ID:   ${marketIndex}`);
+    console.log(`  Market PDA:  ${marketPda.toBase58()}`);
+    console.log(`  Vault PDA:   ${marketVaultPda.toBase58()}`);
+    console.log(`  LP Position: ${lpPositionPda.toBase58()}`);
+    console.log(`  Close time:  ${new Date(closeTime * 1000).toLocaleString()}`);
+    console.log(`  Category:    0 (Sports)`);
+
+    const sig = await program.methods
+      .createMarket("Will SOL hit $200?", new BN(closeTime), 0)
+      .accountsPartial({
+        creator: payer.publicKey,
+        globalState: globalStatePda,
+        market: marketPda,
+        lpPosition: lpPositionPda,
+        marketVault: marketVaultPda,
+        creatorTokenAccount: creatorTokenAccount,
+        acceptedMint: usdcMint,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .rpc({ commitment: "confirmed" });
+
+    console.log(`  ✓ create_market: ${sig}`);
+
+    // Verify market was created
+    const market: any = await program.account.market.fetch(marketPda);
+    const question = String.fromCharCode(
+      ...market.question.slice(0, market.questionLen),
+    );
+    console.log(`  ✓ On-chain question: "${question}"`);
+    console.log(`  ✓ Market state:      ${market.state} (0=Active)`);
+    console.log(`  ✓ Creator bond:      ${fmtUsdc(market.creatorBond)} USDC`);
+    console.log(`  ✓ Vault balance:     ${fmtUsdc((await getAccount(connection, marketVaultPda)).amount)} USDC`);
+
+    const vaultBal = await getAccount(connection, marketVaultPda);
+    console.assert(
+      Number(vaultBal.amount) === CREATOR_BOND,
+      `Expected vault balance = ${CREATOR_BOND}, got ${vaultBal.amount}`,
+    );
+    console.log(`  ✓ Bond of $10 USDC locked in vault`);
+
+    console.log(`\n  ✓ Step 2 complete.`);
+  });
+
+  // ── Step 3: 5 Users Place Bets ────────────────────────────────────────────
+
+  it("Step 3: 5 traders place private bets", async () => {
+    console.log("\n═══════════════════════════════════════════════");
+    console.log("  STEP 3: 5 TRADERS PLACE BETS");
+    console.log("═══════════════════════════════════════════════\n");
+
+    // Create 5 users — 3 bet YES (side=1), 2 bet NO (side=0)
+    const betSides = [1, 1, 1, 0, 0]; // 3x YES, 2x NO
+
+    console.log(`  Creating 5 funded wallets...`);
+
+    for (let i = 0; i < 5; i++) {
+      const keypair = Keypair.generate();
+      const sig = await connection.requestAirdrop(
+        keypair.publicKey,
+        2 * LAMPORTS_PER_SOL,
+      );
+      await connection.confirmTransaction(sig, "confirmed");
+
+      const usdcAccount = await createAccount(
+        connection,
+        payer,
+        usdcMint,
+        keypair.publicKey,
+        Keypair.generate(),
+      );
+
+      await mintTo(connection, payer, usdcMint, usdcAccount, payer, BET_AMOUNT);
+
+      const positionPda = findPositionPda(marketPda, keypair.publicKey);
+
+      users.push({ keypair, usdcAccount, side: betSides[i], positionPda });
+
+      console.log(
+        `  User ${i + 1}: ${keypair.publicKey.toBase58().slice(0, 12)}... ` +
+          `| ${betSides[i] === 1 ? "YES" : "NO"} | ` +
+          `Token: ${usdcAccount.toBase58().slice(0, 12)}...`,
+      );
+    }
+
+    await sleep(2_000);
+    console.log(``);
+
+    // Fail fast if the test was not launched by `arcium test`
+    if (!ARCIUM_ENV) {
+      throw new Error(
+        "ARCIUM_CLUSTER_OFFSET is not set.\n" +
+        "  This test requires the Arcium MXE cluster.\n" +
+        "  Run:  arcium test\n" +
+        "  Not:  anchor test  (skips MXE init + DKG)",
+      );
+    }
+
+    // Wait for Arcium MXE cluster to finish key agreement
+    const mxePubKey = await waitForMxeReady(provider);
+
+    // Compute net bet amount (user must encrypt the post-fee amount)
+    const protocol_fee = Math.floor(BET_AMOUNT * PROTOCOL_FEE_BPS / 10_000);
+    const lp_fee = Math.floor(BET_AMOUNT * LP_FEE_BPS / 10_000);
+    const NET_BET_AMOUNT = BET_AMOUNT - protocol_fee - lp_fee;
+    console.log(`  Net bet per user: ${fmtUsdc(NET_BET_AMOUNT)} USDC (after fees)`);
+
+    // Collect computation offsets so we can await all callbacks afterwards
+    const computationOffsets: BN[] = [];
+
+    // Place bets with real Enc<Shared> encryption
+    for (let i = 0; i < 5; i++) {
+      const u = users[i];
+      const vaultBefore = await getAccount(connection, marketVaultPda);
+
+      const { encryptedAmount, encryptedSide, pubKey, nonce } =
+        encryptBetInput(NET_BET_AMOUNT, u.side, mxePubKey);
+
+      // Unique computation offset per user
+      const computationOffset = new BN(Date.now() + i * 100);
+      computationOffsets.push(computationOffset);
+
+      console.log(
+        `  Bettor ${i + 1} (${u.side === 1 ? "YES" : "NO"}): ` +
+          `placing ${fmtUsdc(BET_AMOUNT)} USDC...`,
+      );
+
+      try {
+        const betSig = await (program.methods as any)
+          .placePrivateBetYesno(
+            computationOffset,
+            new BN(BET_AMOUNT),
+            encryptedAmount,
+            encryptedSide,
+            pubKey,
+            nonce,
+          )
+          .accountsPartial({
+            payer: payer.publicKey,
+            signPdaAccount: findSignPdaAccount(),
+            mxeAccount: getMXEAccAddress(PROGRAM_ID),
+            mempoolAccount: getMempoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+            executingPool: getExecutingPoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+            computationAccount: getComputationAccAddress(
+              ARCIUM_ENV!.arciumClusterOffset,
+              computationOffset as any,
+            ),
+            compDefAccount: getCompDefAccAddress(
+              PROGRAM_ID,
+              Buffer.from(getCompDefAccOffset("place_private_bet_yesno")).readUInt32LE(),
+            ),
+            clusterAccount: getClusterAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+            poolAccount: getFeePoolAccAddress(),
+            clockAccount: getClockAccAddress(),
+            systemProgram: SystemProgram.programId,
+            arciumProgram: ARCIUM_PROGRAM_ID,
+            user: u.keypair.publicKey,
+            globalState: globalStatePda,
+            market: marketPda,
+            marketVault: marketVaultPda,
+            userTokenAccount: u.usdcAccount,
+            protocolTreasury: treasury,
+            position: u.positionPda,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([u.keypair])
+          .rpc({ commitment: "confirmed" });
+
+        console.log(`    ✓ tx: ${betSig}`);
+
+        const vaultAfter = await getAccount(connection, marketVaultPda);
+        console.log(
+          `    Vault: ${fmtUsdc(vaultBefore.amount)} → ${fmtUsdc(vaultAfter.amount)}`,
+        );
+      } catch (e: any) {
+        console.log(`    ✗ FAILED: ${e.message}`);
+      }
+    }
+
+    // ── Await Arcium callbacks for all 5 bets ─────────────────────────────────
+    console.log(`\n  Awaiting Arcium callbacks for all bets...`);
+    let allSettled = false;
+
+    await Promise.allSettled(
+      computationOffsets.map(async (offset, i) => {
+        try {
+          const cbSig = await awaitComputationFinalization(
+            provider,
+            offset,
+            PROGRAM_ID,
+            "confirmed",
+            CALLBACK_TIMEOUT_MS,
+          );
+          console.log(`    ✓ Bet ${i + 1} callback: ${cbSig}`);
+          const pos: any = await program.account.encryptedPosition.fetch(
+            users[i].positionPda,
+          );
+          console.log(
+            `    User ${i + 1} (${users[i].side === 1 ? "YES" : "NO"}): ` +
+              `entry_odds=${pos.entryOdds.toString()}, claimed=${pos.claimed}`,
+          );
+        } catch (e: any) {
+          console.log(`    ℹ Bet ${i + 1} callback timeout/error: ${e.message}`);
+        }
+      }),
+    );
+
+    // Verify final count
+    try {
+      const market: any = await program.account.market.fetch(marketPda);
+      const count = Number(market.totalBetsCount.toString());
+      console.log(`\n  total_bets_count: ${count} / 5`);
+      allSettled = count >= 5;
+      if (allSettled) console.log(`  ✓ All 5 bets confirmed on-chain!`);
+    } catch {}
+
+    if (!allSettled) {
+      console.log(`  ℹ Not all callbacks received within timeout.`);
+    }
+
+    // Check vault balance
+    try {
+      const vaultFinal = await getAccount(connection, marketVaultPda);
+      console.log(`\n  Final vault balance: ${fmtUsdc(vaultFinal.amount)} USDC`);
+    } catch (e: any) {
+      console.log(`\n  Could not fetch vault balance: ${e.message}`);
+    }
+    console.log(`  ✓ Step 3 complete.`);
+  });
+
+  // ── Step 4: Wait + Resolve Market ─────────────────────────────────────────
+
+  it("Step 4: resolve market to YES (outcome=1)", async () => {
+    console.log("\n═══════════════════════════════════════════════");
+    console.log("  STEP 4: RESOLVE MARKET");
+    console.log("═══════════════════════════════════════════════\n");
+
+    // Wait for close_time
+    await waitUntil(closeTime + 5, "close_time"); // +5s grace for validator clock
+
+    const marketBefore: any = await program.account.market.fetch(marketPda);
+    console.log(`  Market state before: ${marketBefore.state} (0=Active)`);
+    console.log(`  Total bets: ${marketBefore.totalBetsCount.toString()}`);
+    console.log(`  Encrypted pool_0: ${Buffer.from(marketBefore.encryptedPool0).toString("hex").slice(0, 16)}...`);
+    console.log(`  Encrypted pool_1: ${Buffer.from(marketBefore.encryptedPool1).toString("hex").slice(0, 16)}...`);
+
+    // Resolve as YES (outcome=1)
+    const computationOffset = new BN(Date.now());
+
+    console.log(`\n  Resolving with outcome=1 (YES)...`);
+
+    try {
+      const resolveSig = await (program.methods as any)
+        .resolveMarketYesno(computationOffset, 1)
+        .accountsPartial({
+          payer: payer.publicKey,
+          signPdaAccount: findSignPdaAccount(),
+          mxeAccount: getMXEAccAddress(PROGRAM_ID),
+          mempoolAccount: getMempoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+          executingPool: getExecutingPoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+          computationAccount: getComputationAccAddress(
+            ARCIUM_ENV!.arciumClusterOffset,
+            computationOffset as any,
+          ),
+          compDefAccount: getCompDefAccAddress(
+            PROGRAM_ID,
+            Buffer.from(getCompDefAccOffset("reveal_market_outcome_yesno")).readUInt32LE(),
+          ),
+          clusterAccount: getClusterAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+          poolAccount: getFeePoolAccAddress(),
+          clockAccount: getClockAccAddress(),
+          systemProgram: SystemProgram.programId,
+          arciumProgram: ARCIUM_PROGRAM_ID,
+          resolver: payer.publicKey,
+          market: marketPda,
+        })
+        .rpc({ commitment: "confirmed" });
+
+      console.log(`  ✓ resolve_market_yesno: ${resolveSig}`);
+    } catch (e: any) {
+      console.log(`  ✗ FAILED: ${e.message}`);
+      console.log(`  ℹ This step requires Arcium.`);
+    }
+
+    // Check pending_outcome was set immediately
+    const marketMid: any = await program.account.market.fetch(marketPda);
+    console.log(`  pending_outcome: ${marketMid.pendingOutcome}`);
+
+    // ── Poll for Arcium callback to fire ───────────────────────────────────
+    console.log(`\n  Waiting for reveal callback to fire...`);
+    const pollStart = Date.now();
+    let resolved = false;
+
+    while (Date.now() - pollStart < CALLBACK_TIMEOUT_MS) {
+      await sleep(POLL_INTERVAL_MS);
+      try {
+        const market: any = await program.account.market.fetch(marketPda);
+        if (market.state === 2) {
+          // Resolved
+          resolved = true;
+          console.log(`\n  ✓ Market resolved via Arcium callback!`);
+
+          const question = String.fromCharCode(
+            ...market.question.slice(0, market.questionLen),
+          );
+          console.log(`  Question:      "${question}"`);
+          console.log(`  State:         ${market.state} (2=Resolved)`);
+          console.log(`  Outcome:       ${market.outcome} (1=YES)`);
+          console.log(`  YES pool:      ${fmtUsdc(market.revealedPool0)} USDC`);
+          console.log(`  NO pool:       ${fmtUsdc(market.revealedPool1)} USDC`);
+          console.log(`  Payout ratio:  ${market.payoutRatio.toString()}`);
+          console.log(`  Resolution:    ${new Date(market.resolutionTime.toNumber() * 1000).toLocaleString()}`);
+          console.log(`  Claim deadline: ${new Date(market.claimDeadline.toNumber() * 1000).toLocaleString()}`);
+
+          // Verify consistency
+          console.assert(
+            market.outcome === 1,
+            `Expected outcome=1, got ${market.outcome}`,
+          );
+          console.assert(
+            Number(market.revealedPool0) > 0,
+            "YES pool should be > 0",
+          );
+          console.assert(
+            Number(market.revealedPool1) > 0,
+            "NO pool should be > 0",
+          );
+          console.assert(
+            Number(market.payoutRatio) > 0,
+            "payout_ratio should be > 0",
+          );
+          console.log(`  ✓ All assertions passed`);
+          break;
+        }
+        console.log(`    State: ${market.state} (waiting for 2=Resolved)`);
+      } catch {
+        // not ready yet
+      }
+    }
+
+    if (!resolved) {
+      console.log(`  ℹ Market not resolved within timeout. Proceeding...`);
+    }
+
+    console.log(`\n  ✓ Step 4 complete.`);
+  });
+
+  // ── Step 5 + 6: Claim Payouts ────────────────────────────────────────────
+
+  it("Step 5+6: winners claim payouts, losers claim zero", async () => {
+    console.log("\n═══════════════════════════════════════════════");
+    console.log("  STEPS 5+6: CLAIM PAYOUTS");
+    console.log("═══════════════════════════════════════════════\n");
+
+    const marketState: any = await program.account.market.fetch(marketPda);
+    const isResolved = marketState.state === 2;
+
+    if (!isResolved) {
+      console.log(`  ℹ Market not resolved. Skipping claim steps.`);
+      return;
+    }
+
+    const vaultBeforeClaim = await getAccount(connection, marketVaultPda);
+    console.log(`  Vault balance before claims: ${fmtUsdc(vaultBeforeClaim.amount)} USDC`);
+
+    // Process all 5 users: YES bettors (0,1,2) win, NO bettors (3,4) lose
+    // But claims are individual — each user queues their own computation
+
+    for (let i = 0; i < 5; i++) {
+      const u = users[i];
+      const isWinner = u.side === 1; // YES wins
+
+      console.log(
+        `\n  ── User ${i + 1} (${isWinner ? "WINNER" : "LOSER"}) ──`,
+      );
+
+      const posBefore: any = await program.account.encryptedPosition.fetch(
+        u.positionPda,
+      );
+      console.log(`  Already claimed: ${posBefore.claimed}`);
+
+      if (posBefore.claimed) {
+        console.log(`  Already claimed, skipping...`);
+        continue;
+      }
+
+      const computationOffset = new BN(Date.now() + i * 100);
+
+      try {
+        // All users call claimPayoutYesno — winners receive payout, losers get 0 (position marked claimed)
+        const claimSig = await (program.methods as any)
+          .claimPayoutYesno(computationOffset)
+          .accountsPartial({
+            payer: payer.publicKey,
+            signPdaAccount: findSignPdaAccount(),
+            mxeAccount: getMXEAccAddress(PROGRAM_ID),
+            mempoolAccount: getMempoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+            executingPool: getExecutingPoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+            computationAccount: getComputationAccAddress(
+              ARCIUM_ENV!.arciumClusterOffset,
+              computationOffset as any,
+            ),
+            compDefAccount: getCompDefAccAddress(
+              PROGRAM_ID,
+              Buffer.from(getCompDefAccOffset("compute_yesno_payout")).readUInt32LE(),
+            ),
+            clusterAccount: getClusterAccAddress(ARCIUM_ENV!.arciumClusterOffset),
+            poolAccount: getFeePoolAccAddress(),
+            clockAccount: getClockAccAddress(),
+            systemProgram: SystemProgram.programId,
+            arciumProgram: ARCIUM_PROGRAM_ID,
+            user: u.keypair.publicKey,
+            market: marketPda,
+            position: u.positionPda,
+            marketVault: marketVaultPda,
+            userTokenAccount: u.usdcAccount,
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .signers([u.keypair])
+          .rpc({ commitment: "confirmed" });
+
+        console.log(`  ✓ claim_payout queued: ${claimSig}`);
+      } catch (e: any) {
+        console.log(`  ✗ FAILED: ${e.message}`);
+      }
+
+      await sleep(500);
+    }
+
+    // ── Poll for Arcium callbacks ──────────────────────────────────────────
+    console.log(`\n  Waiting for claim callbacks...`);
+    const pollStart = Date.now();
+    let allClaimed = false;
+
+    while (Date.now() - pollStart < CALLBACK_TIMEOUT_MS) {
+      await sleep(POLL_INTERVAL_MS);
+      try {
+        const claims: boolean[] = [];
+        for (let i = 0; i < 5; i++) {
+          const pos: any = await program.account.encryptedPosition.fetch(
+            users[i].positionPda,
+          );
+          claims.push(pos.claimed);
+        }
+        const claimed = claims.filter(Boolean).length;
+        console.log(`    Claimed: ${claimed} / 5`);
+
+        if (claimed >= 5) {
+          allClaimed = true;
+          console.log(`\n  ✓ All positions claimed via callbacks!`);
+          break;
+        }
+      } catch {
+        // not ready
+      }
+    }
+
+    if (!allClaimed) {
+      console.log(`  ℹ Not all callbacks received. Reading current state...`);
+    }
+
+    // Read final state
+    console.log(`\n  ── Final Position States ──`);
+    for (let i = 0; i < 5; i++) {
+      const u = users[i];
+      const pos: any = await program.account.encryptedPosition
+        .fetch(u.positionPda)
+        .catch(() => null);
+      const tokenBal = await getAccount(connection, u.usdcAccount);
+
+      if (pos) {
+        console.log(
+          `  User ${i + 1} (${u.side === 1 ? "YES" : "NO"}): ` +
+            `claimed=${pos.claimed} | ` +
+            `USDC=${fmtUsdc(tokenBal.amount)} | ` +
+            `entry_odds=${pos.entryOdds.toString()}`,
+        );
+      } else {
+        console.log(
+          `  User ${i + 1}: position not found | USDC=${fmtUsdc(tokenBal.amount)}`,
+        );
+      }
+    }
+
+    // Check vault balance
+    const vaultAfter = await getAccount(connection, marketVaultPda);
+    console.log(`\n  Vault balance after claims: ${fmtUsdc(vaultAfter.amount)} USDC`);
+    console.log(`\n  ✓ Steps 5+6 complete.`);
+  });
+
+  // ── Step 7: Creator Withdraws ─────────────────────────────────────────────
+
+  it("Step 7: creator withdraws bond + LP fees", async () => {
+    console.log("\n═══════════════════════════════════════════════");
+    console.log("  STEP 7: CREATOR WITHDRAW FUNDS");
+    console.log("═══════════════════════════════════════════════\n");
+
+    const marketState: any = await program.account.market.fetch(marketPda);
+
+    if (marketState.state !== 2) {
+      console.log(`  ℹ Market not resolved (state=${marketState.state}). Skipping withdraw.`);
+      return;
+    }
+
+    // Check bond not already withdrawn
+    console.assert(!marketState.bondWithdrawn, "Bond should not be withdrawn yet");
+    console.log(`  Bond already withdrawn: ${marketState.bondWithdrawn}`);
+
+    const lpPos: any = await program.account.lpPosition.fetch(lpPositionPda);
+    console.log(`  LP fees earned: ${fmtUsdc(lpPos.feesEarned)} USDC`);
+    console.log(`  Bond: ${fmtUsdc(marketState.creatorBond)} USDC`);
+    console.log(
+      `  Total to withdraw: ${fmtUsdc(Number(marketState.creatorBond) + Number(lpPos.feesEarned))} USDC`,
+    );
+
+    const creatorBalBefore = await getAccount(connection, creatorTokenAccount);
+    const vaultBefore = await getAccount(connection, marketVaultPda);
+    console.log(`\n  Creator USDC before: ${fmtUsdc(creatorBalBefore.amount)}`);
+    console.log(`  Vault before:        ${fmtUsdc(vaultBefore.amount)}`);
+
+    try {
+      const sig = await program.methods
+        .withdrawCreatorFunds()
+        .accountsPartial({
+          creator: payer.publicKey,
+          market: marketPda,
+          lpPosition: lpPositionPda,
+          marketVault: marketVaultPda,
+          creatorTokenAccount: creatorTokenAccount,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .rpc({ commitment: "confirmed" });
+
+      console.log(`  ✓ withdraw_creator_funds: ${sig}`);
+
+      const creatorBalAfter = await getAccount(connection, creatorTokenAccount);
+      const vaultAfter = await getAccount(connection, marketVaultPda);
+      const marketAfter: any = await program.account.market.fetch(marketPda);
+      const lpPosAfter: any = await program.account.lpPosition.fetch(lpPositionPda);
+
+      console.log(`\n  Creator USDC after:  ${fmtUsdc(creatorBalAfter.amount)}`);
+      console.log(`  Vault after:         ${fmtUsdc(vaultAfter.amount)}`);
+      console.log(`  Bond withdrawn:      ${marketAfter.bondWithdrawn}`);
+      console.log(`  LP fees claimed:     ${lpPosAfter.feesClaimed}`);
+
+      console.assert(
+        Number(creatorBalAfter.amount) > Number(creatorBalBefore.amount),
+        "Creator should have more USDC after withdrawal",
+      );
+      console.log(`  ✓ Bond + LP fees successfully withdrawn`);
+    } catch (e: any) {
+      console.log(`  ✗ FAILED: ${e.message}`);
+    }
+
+    console.log(`\n  ✓ Step 7 complete.`);
+  });
+
+  // ── Final Summary ─────────────────────────────────────────────────────────
+
+  after(async () => {
+    console.log("\n═══════════════════════════════════════════════");
+    console.log("  E2E TEST SUMMARY");
+    console.log("═══════════════════════════════════════════════\n");
+
+    try {
+      const market: any = await program.account.market.fetch(marketPda);
+      const question = String.fromCharCode(
+        ...market.question.slice(0, market.questionLen),
+      );
+      const vault = await getAccount(connection, marketVaultPda);
+
+      console.log(`  Market:       "${question}"`);
+      console.log(`  State:        ${["Active", "Closed", "Resolved", "Unresolved"][market.state] ?? market.state}`);
+      console.log(`  Outcome:      ${market.outcome}`);
+      console.log(`  Total bets:   ${market.totalBetsCount.toString()}`);
+      console.log(`  YES pool:     ${fmtUsdc(market.revealedPool0)} USDC`);
+      console.log(`  NO pool:      ${fmtUsdc(market.revealedPool1)} USDC`);
+      console.log(`  Payout ratio: ${market.payoutRatio.toString()}`);
+      console.log(`  Vault:        ${fmtUsdc(vault.amount)} USDC`);
+      console.log(`  Bond w/drawn: ${market.bondWithdrawn}`);
+
+      console.log(`\n  ── User PnL ──`);
+      for (let i = 0; i < users.length; i++) {
+        const u = users[i];
+        const pos = await program.account.encryptedPosition
+          .fetch(u.positionPda)
+          .catch(() => null);
+        const bal = await getAccount(connection, u.usdcAccount);
+        const net = Number(bal.amount) - BET_AMOUNT;
+        console.log(
+          `  User ${i + 1} (${u.side === 1 ? "YES" : "NO"}): ` +
+            `${fmtUsdc(bal.amount)} USDC ` +
+            `(${net >= 0 ? "+" : ""}${fmtUsdc(Math.abs(net))} USDC) ` +
+            `claimed=${pos?.claimed ?? "?"}`,
+        );
+      }
+
+      const lpPos = await program.account.lpPosition.fetch(lpPositionPda).catch(() => null);
+      if (lpPos) {
+        console.log(`\n  Creator LP fees earned: ${fmtUsdc(lpPos.feesEarned)} USDC`);
+        console.log(`  LP fees claimed:       ${lpPos.feesClaimed}`);
+        console.log(`  LP fees claimed amt:   ${fmtUsdc(lpPos.feesClaimedAmount)} USDC`);
+      }
+    } catch (e: any) {
+      console.log(`  Could not fetch final state: ${e.message}`);
+    }
+
+    console.log(`\n═══════════════════════════════════════════════`);
+    console.log("  ✓ YES/NO E2E TEST COMPLETE");
+    console.log("═══════════════════════════════════════════════\n");
+  });
+});

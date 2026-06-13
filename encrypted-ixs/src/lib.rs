@@ -40,9 +40,8 @@ mod circuits {
     //  Updates the pools, locks entry_odds for this user.
     //
     //  ArgBuilder order in lib.rs:
-    //    .plaintext_u128(market.mxe_nonce)        ← Enc<Mxe> nonce for yes_pool
+    //    .plaintext_u128(market.mxe_nonce)        ← Enc<Mxe> nonce (shared by all fields)
     //    .encrypted_u64(market.encrypted_yes_pool)
-    //    .plaintext_u128(market.mxe_nonce)        ← Enc<Mxe> nonce for no_pool
     //    .encrypted_u64(market.encrypted_no_pool)
     //    .x25519_pubkey(pub_key)                  ← Enc<Shared> pubkey for BetInput
     //    .plaintext_u128(nonce)                   ← Enc<Shared> nonce
@@ -143,7 +142,7 @@ mod circuits {
 
     #[instruction]
     pub fn compute_yesno_payout(
-        position_data: Enc<Mxe, BetInput>,
+        position_data: Enc<Shared, BetInput>,
         outcome: u8,       // plaintext — from Market
         payout_ratio: u64, // plaintext — from Market (scaled 1e9)
     ) -> (u64, bool) {
@@ -171,7 +170,7 @@ mod circuits {
     //    .encrypted_u64(position.encrypted_amount)
 
     #[instruction]
-    pub fn compute_yesno_refund(position_data: Enc<Mxe, BetInput>) -> u64 {
+    pub fn compute_yesno_refund(position_data: Enc<Shared, BetInput>) -> u64 {
         let pos = position_data.to_arcis();
         // return their exact net amount
         pos.amount.reveal()
@@ -319,10 +318,8 @@ mod circuits {
         (payout.reveal(), is_winner.reveal())
     }
 
-    // ══════════════════════════════════════════════════════════════════════════
     //  CIRCUIT 8 — compute_multi_refund
     //  Identical to yesno refund — just decrypt and return amount.
-    // ══════════════════════════════════════════════════════════════════════════
 
     #[instruction]
     pub fn compute_multi_refund(position_data: Enc<Mxe, BetInput>) -> u64 {
