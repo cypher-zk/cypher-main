@@ -19,6 +19,7 @@ pub const MARKET_SPACE: usize = 8    // discriminator
     + 200 // question: [u8; 200]
     + 1   // question_len: u8
     + 1   // market_type: u8   0=YesNo, 1=MultiOutcome
+    + 1 // num_outcomes: u8  (0 for YesNo, 2-4 for MultiOutcome)
     + 1  // category: u8
     + 32  // creator: Pubkey
     + 32  // resolver: Pubkey
@@ -138,6 +139,7 @@ pub struct Market {
     pub question_len: u8,
     /// 0 = YesNo, 1 = MultiOutcome
     pub market_type: u8,
+    pub num_outcomes: u8,
     pub category: u8,
     pub creator: Pubkey,
     /// Who can call resolve_market
