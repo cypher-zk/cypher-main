@@ -29,7 +29,7 @@ import {
   getLookupTableAddress,
   getMXEPublicKey,
   x25519,
-  CSplRescueCipher,
+  RescueCipher,
   deserializeLE,
   awaitComputationFinalization,
   uploadCircuit,
@@ -183,7 +183,7 @@ function encryptBetInput(
   const userPubKey = x25519.getPublicKey(userPrivKey);
   const sharedSecret = x25519.getSharedSecret(userPrivKey, mxePubKey);
 
-  const cipher = new CSplRescueCipher(sharedSecret);
+  const cipher = new RescueCipher(sharedSecret);
 
   const nonceBytes = new Uint8Array(16);
   crypto.getRandomValues(nonceBytes);

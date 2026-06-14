@@ -29,7 +29,7 @@ import {
   getLookupTableAddress,
   getMXEPublicKey,
   x25519,
-  CSplRescueCipher,
+  RescueCipher,
   deserializeLE,
   awaitComputationFinalization,
   uploadCircuit,
@@ -166,7 +166,7 @@ async function waitForMxeReady(
   throw new Error("MXE keys never became available — is the Arcium cluster running?");
 }
 
-// Encrypts amount (u64) + side (u8) with x25519 ECDH + CSplRescueCipher (Enc<Shared>).
+// Encrypts amount (u64) + side (u8) with x25519 ECDH + RescueCipher (Enc<Shared>).
 // Returns the values to pass directly to place_private_bet_yesno.
 function encryptBetInput(
   netAmount: number,
@@ -183,7 +183,7 @@ function encryptBetInput(
   const userPubKey = x25519.getPublicKey(userPrivKey);
   const sharedSecret = x25519.getSharedSecret(userPrivKey, mxePubKey);
 
-  const cipher = new CSplRescueCipher(sharedSecret);
+  const cipher = new RescueCipher(sharedSecret);
 
   // 16 random bytes as LE nonce
   const nonceBytes = new Uint8Array(16);
