@@ -6,6 +6,12 @@
       "sourceType": "github",
       "skillPath": "skills/arcium/SKILL.md",
       "computedHash": "f3ec3d56871c3b0d980d8d93e2d1c18cd00b813464cef908c130769f79d94656"
+    },
+    "solana-dev": {
+      "source": "solana-foundation/solana-dev-skill",
+      "sourceType": "github",
+      "skillPath": "skill/SKILL.md",
+      "computedHash": "51ba37080e2377cd57f278db8702dc9cfcd1f7520a42cbcca8f83924d59b0560"
     }
   }
 }

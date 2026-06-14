@@ -307,6 +307,7 @@ pub mod cypher {
             ),
             CREATOR_BOND,
         )?;
+        ctx.accounts.market.state = MARKET_STATE_CLOSED;
         emit!(MarketCancelledEvent {
             market: ctx.accounts.market.key(),
             creator: ctx.accounts.creator.key(),
@@ -366,10 +367,19 @@ pub mod cypher {
             !ctx.accounts.market.admin_claimed_remaining,
             CypherError::AdminAlreadyClaimed
         );
-        require!(
-            Clock::get()?.unix_timestamp > ctx.accounts.market.refund_deadline,
-            CypherError::ResolutionDeadlineNotReached
-        );
+        let now = Clock::get()?.unix_timestamp;
+        let market = &ctx.accounts.market;
+        if market.state == MARKET_STATE_RESOLVED {
+            require!(
+                now > market.refund_deadline,
+                CypherError::ResolutionDeadlineNotReached
+            );
+        } else {
+            require!(
+                now > market.resolution_deadline + DEFAULT_REFUND_PERIOD,
+                CypherError::ResolutionDeadlineNotReached
+            );
+        }
         let balance = ctx.accounts.market_vault.amount;
         require!(balance > 0, CypherError::InsufficientVaultBalance);
 
@@ -404,6 +414,10 @@ pub mod cypher {
         pub_key: [u8; 32],
         nonce: u128,
     ) -> Result<()> {
+        require!(
+            ctx.accounts.market.market_type == MARKET_TYPE_YESNO,
+            CypherError::WrongMarketType
+        );
         require!(
             ctx.accounts.market.state == MARKET_STATE_ACTIVE,
             CypherError::MarketNotActive
@@ -474,6 +488,12 @@ pub mod cypher {
             .checked_add(lp_fee)
             .ok_or(CypherError::Overflow)?;
 
+        let net_amount = bet_amount_usdc
+            .checked_sub(protocol_fee)
+            .ok_or(CypherError::Overflow)?
+            .checked_sub(lp_fee)
+            .ok_or(CypherError::Overflow)?;
+
         let pos = &mut ctx.accounts.position;
         pos.user = ctx.accounts.user.key();
         pos.market = ctx.accounts.market.key();
@@ -482,6 +502,7 @@ pub mod cypher {
         pos.user_pubkey = pub_key;
         pos.nonce = nonce;
         pos.entry_odds = 0;
+        pos.net_amount = net_amount;
         pos.claimed = false;
         pos.bump = ctx.bumps.position;
 
@@ -496,6 +517,7 @@ pub mod cypher {
         let args = ArgBuilder::new()
             .plaintext_u64(m.revealed_pool_0)
             .plaintext_u64(m.revealed_pool_1)
+            .plaintext_u64(net_amount)
             .x25519_pubkey(pub_key)
             .plaintext_u128(nonce)
             .encrypted_u64(encrypted_amount)
@@ -656,6 +678,12 @@ pub mod cypher {
             .checked_add(lp_fee)
             .ok_or(CypherError::Overflow)?;
 
+        let net_amount = bet_amount_usdc
+            .checked_sub(protocol_fee)
+            .ok_or(CypherError::Overflow)?
+            .checked_sub(lp_fee)
+            .ok_or(CypherError::Overflow)?;
+
         // Init position before circuit runs — same pattern as YesNo
         let pos = &mut ctx.accounts.position;
         pos.user = ctx.accounts.user.key();
@@ -665,6 +693,7 @@ pub mod cypher {
         pos.user_pubkey = pub_key;
         pos.nonce = nonce;
         pos.entry_odds = 0;
+        pos.net_amount = net_amount;
         pos.claimed = false;
         pos.bump = ctx.bumps.position;
 
@@ -676,6 +705,7 @@ pub mod cypher {
             .plaintext_u64(m.revealed_pool_1)
             .plaintext_u64(m.revealed_pool_2)
             .plaintext_u64(m.revealed_pool_3)
+            .plaintext_u64(net_amount)
             .x25519_pubkey(pub_key)
             .plaintext_u128(nonce)
             .encrypted_u64(encrypted_amount)
@@ -754,6 +784,10 @@ pub mod cypher {
         outcome_value: u8,
     ) -> Result<()> {
         require!(
+            ctx.accounts.market.market_type == MARKET_TYPE_YESNO,
+            CypherError::WrongMarketType
+        );
+        require!(
             ctx.accounts.market.state == MARKET_STATE_ACTIVE,
             CypherError::MarketNotActive
         );
@@ -762,7 +796,7 @@ pub mod cypher {
             CypherError::MarketStillOpen
         );
         require!(
-            outcome_value == 1 || outcome_value == 2,
+            outcome_value == 0 || outcome_value == 1,
             CypherError::InvalidOutcome
         );
 
@@ -799,6 +833,12 @@ pub mod cypher {
         ctx: Context<RevealMarketOutcomeYesnoCallback>,
         output: SignedComputationOutputs<RevealMarketOutcomeYesnoOutput>,
     ) -> Result<()> {
+        // M-3: prevent a second callback from overwriting an already-resolved market
+        require!(
+            ctx.accounts.market.state != MARKET_STATE_RESOLVED,
+            CypherError::AlreadyResolved
+        );
+
         let o = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
@@ -810,6 +850,9 @@ pub mod cypher {
         let yes_pool = o.field_0;
         let no_pool = o.field_1;
         let payout_ratio = o.field_2;
+        // M-3: use the outcome the circuit actually ran with (field_3), not pending_outcome
+        // which could have been overwritten by a concurrent resolve call.
+        let outcome = o.field_3;
         let now = Clock::get()?.unix_timestamp;
 
         let m = &mut ctx.accounts.market;
@@ -817,7 +860,7 @@ pub mod cypher {
         m.revealed_pool_1 = no_pool;
         m.payout_ratio = payout_ratio;
         m.state = MARKET_STATE_RESOLVED;
-        m.outcome = m.pending_outcome;
+        m.outcome = outcome;
         m.resolution_time = now;
         m.claim_deadline = now + DEFAULT_CLAIM_PERIOD;
         m.refund_deadline = now + DEFAULT_CLAIM_PERIOD + DEFAULT_REFUND_PERIOD;
@@ -893,6 +936,12 @@ pub mod cypher {
         ctx: Context<RevealMarketOutcomeMultiCallback>,
         output: SignedComputationOutputs<RevealMarketOutcomeMultiOutput>,
     ) -> Result<()> {
+        // M-3: prevent a second callback from overwriting an already-resolved market
+        require!(
+            ctx.accounts.market.state != MARKET_STATE_RESOLVED,
+            CypherError::AlreadyResolved
+        );
+
         let o = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
@@ -901,7 +950,8 @@ pub mod cypher {
             Err(_) => return Err(CypherError::ComputationVerificationFailed.into()),
         };
 
-        // Returns (pool_0, pool_1, pool_2, pool_3, payout_ratio) — all revealed plaintext
+        // Returns (pool_0, pool_1, pool_2, pool_3, payout_ratio, outcome) — all revealed plaintext
+        // M-3: outcome comes from field_5 (what the circuit ran with), not pending_outcome
         let now = Clock::get()?.unix_timestamp;
         let m = &mut ctx.accounts.market;
         m.revealed_pool_0 = o.field_0;
@@ -910,7 +960,7 @@ pub mod cypher {
         m.revealed_pool_3 = o.field_3;
         m.payout_ratio = o.field_4;
         m.state = MARKET_STATE_RESOLVED;
-        m.outcome = m.pending_outcome;
+        m.outcome = o.field_5;
         m.resolution_time = now;
         m.claim_deadline = now + DEFAULT_CLAIM_PERIOD;
         m.refund_deadline = now + DEFAULT_CLAIM_PERIOD + DEFAULT_REFUND_PERIOD;
@@ -947,6 +997,7 @@ pub mod cypher {
         let pos_nonce = ctx.accounts.position.nonce;
         let pos_amount = ctx.accounts.position.encrypted_amount;
         let pos_side = ctx.accounts.position.encrypted_side;
+        let pos_net_amount = ctx.accounts.position.net_amount;
         let mkt_outcome = ctx.accounts.market.outcome;
         let mkt_ratio = ctx.accounts.market.payout_ratio;
 
@@ -957,6 +1008,7 @@ pub mod cypher {
             .encrypted_u8(pos_side)
             .plaintext_u8(mkt_outcome)
             .plaintext_u64(mkt_ratio)
+            .plaintext_u64(pos_net_amount)
             .build();
 
         queue_computation(
@@ -1008,6 +1060,9 @@ pub mod cypher {
         ctx: Context<ComputeYesnoPayoutCallback>,
         output: SignedComputationOutputs<ComputeYesnoPayoutOutput>,
     ) -> Result<()> {
+        // H-2: concurrent queue calls both read claimed=false; guard here prevents double-pay
+        require!(!ctx.accounts.position.claimed, CypherError::AlreadyClaimed);
+
         let o = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
@@ -1073,6 +1128,7 @@ pub mod cypher {
         let pos_nonce = ctx.accounts.position.nonce;
         let pos_amount = ctx.accounts.position.encrypted_amount;
         let pos_side = ctx.accounts.position.encrypted_side;
+        let pos_net_amount = ctx.accounts.position.net_amount;
         let mkt_outcome = ctx.accounts.market.outcome;
         let mkt_ratio = ctx.accounts.market.payout_ratio;
 
@@ -1083,6 +1139,7 @@ pub mod cypher {
             .encrypted_u8(pos_side)
             .plaintext_u8(mkt_outcome)
             .plaintext_u64(mkt_ratio)
+            .plaintext_u64(pos_net_amount)
             .build();
 
         queue_computation(
@@ -1134,6 +1191,9 @@ pub mod cypher {
         ctx: Context<ComputeMultiPayoutCallback>,
         output: SignedComputationOutputs<ComputeMultiPayoutOutput>,
     ) -> Result<()> {
+        // H-2: guard against double-pay from concurrent queue calls
+        require!(!ctx.accounts.position.claimed, CypherError::AlreadyClaimed);
+
         let o = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
@@ -1197,13 +1257,13 @@ pub mod cypher {
         let pos_pubkey = ctx.accounts.position.user_pubkey;
         let pos_nonce = ctx.accounts.position.nonce;
         let pos_amount = ctx.accounts.position.encrypted_amount;
-        let pos_side = ctx.accounts.position.encrypted_side;
+        let pos_net_amount = ctx.accounts.position.net_amount;
 
         let args = ArgBuilder::new()
             .x25519_pubkey(pos_pubkey)
             .plaintext_u128(pos_nonce)
             .encrypted_u64(pos_amount)
-            .encrypted_u8(pos_side)
+            .plaintext_u64(pos_net_amount)
             .build();
 
         queue_computation(
@@ -1255,6 +1315,9 @@ pub mod cypher {
         ctx: Context<ComputeYesnoRefundCallback>,
         output: SignedComputationOutputs<ComputeYesnoRefundOutput>,
     ) -> Result<()> {
+        // H-2: guard against double-refund from concurrent queue calls
+        require!(!ctx.accounts.position.claimed, CypherError::AlreadyClaimed);
+
         let o = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
@@ -1318,13 +1381,13 @@ pub mod cypher {
         let pos_pubkey = ctx.accounts.position.user_pubkey;
         let pos_nonce = ctx.accounts.position.nonce;
         let pos_amount = ctx.accounts.position.encrypted_amount;
-        let pos_side = ctx.accounts.position.encrypted_side;
+        let pos_net_amount = ctx.accounts.position.net_amount;
 
         let args = ArgBuilder::new()
             .x25519_pubkey(pos_pubkey)
             .plaintext_u128(pos_nonce)
             .encrypted_u64(pos_amount)
-            .encrypted_u8(pos_side)
+            .plaintext_u64(pos_net_amount)
             .build();
 
         queue_computation(
@@ -1376,6 +1439,9 @@ pub mod cypher {
         ctx: Context<ComputeMultiRefundCallback>,
         output: SignedComputationOutputs<ComputeMultiRefundOutput>,
     ) -> Result<()> {
+        // H-2: guard against double-refund from concurrent queue calls
+        require!(!ctx.accounts.position.claimed, CypherError::AlreadyClaimed);
+
         let o = match output.verify_output(
             &ctx.accounts.cluster_account,
             &ctx.accounts.computation_account,
@@ -1834,7 +1900,7 @@ pub struct ComputeYesnoPayoutCallback<'info> {
     pub market: Box<Account<'info, Market>>, // ← boxed
     #[account(mut)]
     pub market_vault: Box<Account<'info, TokenAccount>>, // ← boxed
-    #[account(mut)]
+    #[account(mut, constraint = user_token_account.owner == user.key())]
     pub user_token_account: Box<Account<'info, TokenAccount>>, // ← boxed
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -1912,7 +1978,7 @@ pub struct ComputeYesnoRefundCallback<'info> {
     pub market: Box<Account<'info, Market>>, // ← boxed
     #[account(mut)]
     pub market_vault: Box<Account<'info, TokenAccount>>, // ← boxed
-    #[account(mut)]
+    #[account(mut, constraint = user_token_account.owner == user.key())]
     pub user_token_account: Box<Account<'info, TokenAccount>>, // ← boxed
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -2256,7 +2322,7 @@ pub struct ComputeMultiPayoutCallback<'info> {
     pub market: Box<Account<'info, Market>>,
     #[account(mut)]
     pub market_vault: Box<Account<'info, TokenAccount>>,
-    #[account(mut)]
+    #[account(mut, constraint = user_token_account.owner == user.key())]
     pub user_token_account: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -2332,7 +2398,7 @@ pub struct ComputeMultiRefundCallback<'info> {
     pub market: Box<Account<'info, Market>>,
     #[account(mut)]
     pub market_vault: Box<Account<'info, TokenAccount>>,
-    #[account(mut)]
+    #[account(mut, constraint = user_token_account.owner == user.key())]
     pub user_token_account: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,

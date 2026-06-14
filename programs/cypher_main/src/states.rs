@@ -64,6 +64,7 @@ pub const ENCRYPTED_POSITION_SPACE: usize = 8  // discriminator
     + 32  // user_pubkey: [u8;32]   (x25519 — for user to decrypt their own data)
     + 16  // nonce: u128
     + 8   // entry_odds: u64   PUBLIC — computed inside MXE at bet time
+    + 8   // net_amount: u64  on-chain verified amount after fees
     + 1   // claimed: bool
     + 1   // bump: u8
     + 6; // padding
@@ -165,7 +166,7 @@ pub struct Market {
 
     /// 0=Active, 1=Closed, 2=Resolved, 3=Unresolved
     pub state: u8,
-    /// YesNo: 0=None,1=YES,2=NO | Multi: 0=None,1-4=outcome+1
+    /// YesNo: 0=NO, 1=YES (matches BetInput.side encoding) | Multi: 0=None,1-4=outcome+1
     pub outcome: u8,
     /// Pending outcome set in resolve_market, confirmed by reveal callback
     pub pending_outcome: u8,
@@ -208,6 +209,9 @@ pub struct EncryptedPosition {
     /// Entry odds locked at bet time — PUBLIC.
     /// = (total_pool / side_pool) × 1e9, computed inside MXE
     pub entry_odds: u64,
+    /// On-chain verified net amount (bet_amount - protocol_fee - lp_fee).
+    /// Used by payout circuit to cap claims to what was actually deposited.
+    pub net_amount: u64,
     pub claimed: bool,
     pub bump: u8,
 }
