@@ -7,7 +7,7 @@ use arcium_client::idl::arcium::types::CallbackAccount as ArciumCallbackAccount;
 pub mod states;
 use states::*;
 
-declare_id!("E53HYN15wWUEBZqLV6pWnhkifVeB3kXBABF8rLvquryu");
+declare_id!("F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc");
 
 // comp def offsets for yes/no market operations
 
@@ -690,8 +690,14 @@ pub mod cypher {
                 computation_offset,
                 &ctx.accounts.mxe_account,
                 &[
-                    ArciumCallbackAccount { pubkey: ctx.accounts.market.key(), is_writable: true },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.position.key(), is_writable: true },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.market.key(),
+                        is_writable: true,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.position.key(),
+                        is_writable: true,
+                    },
                 ],
             )?],
             1,
@@ -871,9 +877,10 @@ pub mod cypher {
             vec![RevealMarketOutcomeMultiCallback::callback_ix(
                 computation_offset,
                 &ctx.accounts.mxe_account,
-                &[
-                    ArciumCallbackAccount { pubkey: ctx.accounts.market.key(), is_writable: true },
-                ],
+                &[ArciumCallbackAccount {
+                    pubkey: ctx.accounts.market.key(),
+                    is_writable: true,
+                }],
             )?],
             1,
             0,
@@ -1086,13 +1093,34 @@ pub mod cypher {
                 computation_offset,
                 &ctx.accounts.mxe_account,
                 &[
-                    ArciumCallbackAccount { pubkey: ctx.accounts.position.key(), is_writable: true },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.user.key(), is_writable: false },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.market.key(), is_writable: true },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.market_vault.key(), is_writable: true },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.user_token_account.key(), is_writable: true },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.token_program.key(), is_writable: false },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.system_program.key(), is_writable: false },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.position.key(),
+                        is_writable: true,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.user.key(),
+                        is_writable: false,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.market.key(),
+                        is_writable: true,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.market_vault.key(),
+                        is_writable: true,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.user_token_account.key(),
+                        is_writable: true,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.token_program.key(),
+                        is_writable: false,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.system_program.key(),
+                        is_writable: false,
+                    },
                 ],
             )?],
             1,
@@ -1307,13 +1335,34 @@ pub mod cypher {
                 computation_offset,
                 &ctx.accounts.mxe_account,
                 &[
-                    ArciumCallbackAccount { pubkey: ctx.accounts.position.key(), is_writable: true },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.user.key(), is_writable: false },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.market.key(), is_writable: true },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.market_vault.key(), is_writable: true },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.user_token_account.key(), is_writable: true },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.token_program.key(), is_writable: false },
-                    ArciumCallbackAccount { pubkey: ctx.accounts.system_program.key(), is_writable: false },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.position.key(),
+                        is_writable: true,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.user.key(),
+                        is_writable: false,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.market.key(),
+                        is_writable: true,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.market_vault.key(),
+                        is_writable: true,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.user_token_account.key(),
+                        is_writable: true,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.token_program.key(),
+                        is_writable: false,
+                    },
+                    ArciumCallbackAccount {
+                        pubkey: ctx.accounts.system_program.key(),
+                        is_writable: false,
+                    },
                 ],
             )?],
             1,
