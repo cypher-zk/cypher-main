@@ -40,7 +40,7 @@ import * as fs from "fs";
 //  Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-const PROGRAM_ID = new PublicKey("F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc");
+const PROGRAM_ID = new PublicKey("E53HYN15wWUEBZqLV6pWnhkifVeB3kXBABF8rLvquryu");
 const ARCIUM_PROGRAM_ID = getArciumProgramId();
 const ARCIUM_ENV = (() => {
   try {

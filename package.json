@@ -5,7 +5,7 @@
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
     "init:comp-defs": "npx ts-node -P tsconfig.json scripts/init_comp_defs.ts",
     "e2e": "npx ts-node -P tsconfig.json scripts/e2e_yesno.ts",
-    "arcium:clean": "docker-compose -f artifacts/docker-compose-arx-env.yml down && rm -f artifacts/private_shares_node_0/F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc.private_shares artifacts/private_shares_node_1/F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc.private_shares artifacts/public_inputs_node_0/F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc.public_inputs artifacts/public_inputs_node_1/F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc.public_inputs && docker-compose -f artifacts/docker-compose-arx-env.yml up -d && echo 'Arcium containers restarted with clean state — now run: arcium test'"
+    "arcium:clean": "docker-compose -f artifacts/docker-compose-arx-env.yml down && rm -f artifacts/private_shares_node_0/E53HYN15wWUEBZqLV6pWnhkifVeB3kXBABF8rLvquryu.private_shares artifacts/private_shares_node_1/E53HYN15wWUEBZqLV6pWnhkifVeB3kXBABF8rLvquryu.private_shares artifacts/public_inputs_node_0/E53HYN15wWUEBZqLV6pWnhkifVeB3kXBABF8rLvquryu.public_inputs artifacts/public_inputs_node_1/E53HYN15wWUEBZqLV6pWnhkifVeB3kXBABF8rLvquryu.public_inputs && docker-compose -f artifacts/docker-compose-arx-env.yml up -d && echo 'Arcium containers restarted with clean state — now run: arcium test'"
   },
   "dependencies": {
     "@anchor-lang/core": "^1.0.2",
