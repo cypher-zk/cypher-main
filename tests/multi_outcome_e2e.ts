@@ -71,7 +71,6 @@ const BETTOR_CONFIG = [
 ] as const;
 
 const COMP_DEFS = [
-  { circuit: "init_market_multi", method: "initInitMarketMultiCompDef" as any },
   { circuit: "place_private_bet_multi", method: "initPlaceBetMultiCompDef" as any },
   { circuit: "reveal_market_outcome_multi", method: "initRevealMultiCompDef" as any },
   { circuit: "compute_multi_payout", method: "initPayoutMultiCompDef" as any },
@@ -534,50 +533,9 @@ describe("multi_outcome_e2e", function () {
 
     const mxePubKey = await waitForMxeReady(provider);
 
-    // Bootstrap valid zero-encrypted pool ciphertexts via the init_market_multi circuit.
-    console.log(`\n  Bootstrapping encrypted pool ciphertexts (init_market_multi)...`);
-    const initPoolsOffset = new BN(Date.now());
-    const initPoolsSig = await (program.methods as any)
-      .initMarketPoolsMulti(initPoolsOffset)
-      .accountsPartial({
-        payer: payer.publicKey,
-        signPdaAccount: findSignPdaAccount(),
-        mxeAccount: getMXEAccAddress(PROGRAM_ID),
-        mempoolAccount: getMempoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
-        executingPool: getExecutingPoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
-        computationAccount: getComputationAccAddress(
-          ARCIUM_ENV!.arciumClusterOffset,
-          initPoolsOffset as any,
-        ),
-        compDefAccount: getCompDefAccAddress(
-          PROGRAM_ID,
-          Buffer.from(getCompDefAccOffset("init_market_multi")).readUInt32LE(),
-        ),
-        clusterAccount: getClusterAccAddress(ARCIUM_ENV!.arciumClusterOffset),
-        poolAccount: getFeePoolAccAddress(),
-        clockAccount: getClockAccAddress(),
-        systemProgram: SystemProgram.programId,
-        arciumProgram: ARCIUM_PROGRAM_ID,
-        market: marketPda,
-      })
-      .signers([payer])
-      .rpc({ commitment: "confirmed" });
-    console.log(`  ✓ initMarketPoolsMulti tx: ${initPoolsSig}`);
-
-    const initPoolsCbSig = await awaitComputationFinalization(
-      provider,
-      initPoolsOffset,
-      PROGRAM_ID,
-      "confirmed",
-      CALLBACK_TIMEOUT_MS,
-    );
-    console.log(`  ✓ initMarketPoolsMulti callback: ${initPoolsCbSig}`);
-
-    const mktAfterInit: any = await program.account.market.fetch(marketPda);
-    const poolsNonZero =
-      mktAfterInit.encryptedPool0.some((b: number) => b !== 0) ||
-      mktAfterInit.encryptedPool1.some((b: number) => b !== 0);
-    console.log(`  ✓ Encrypted pools bootstrapped (non-zero ciphertexts: ${poolsNonZero})`);
+    // Pools start at 0 (revealed_pool_0/1/2/3) and accumulate with each bet callback.
+    // No init step needed — plaintext pools are valid from market creation.
+    console.log(`\n  Pools start at 0; accumulate with each bet callback (no init needed).`);
 
     // Sequential bets: each waits for its Arcium callback before the next.
     // Concurrent submission would cause all bets to read the same stale pool
@@ -744,10 +702,10 @@ describe("multi_outcome_e2e", function () {
     const marketBefore: any = await program.account.market.fetch(marketPda);
     console.log(`  Market state before: ${marketBefore.state} (0=Active)`);
     console.log(`  Total bets: ${marketBefore.totalBetsCount.toString()}`);
-    console.log(`  Encrypted pool_0: ${Buffer.from(marketBefore.encryptedPool0).toString("hex").slice(0, 16)}...`);
-    console.log(`  Encrypted pool_1: ${Buffer.from(marketBefore.encryptedPool1).toString("hex").slice(0, 16)}...`);
-    console.log(`  Encrypted pool_2: ${Buffer.from(marketBefore.encryptedPool2).toString("hex").slice(0, 16)}...`);
-    console.log(`  Encrypted pool_3: ${Buffer.from(marketBefore.encryptedPool3).toString("hex").slice(0, 16)}...`);
+    console.log(`  Pool 0 (Trump):  ${fmtUsdc(marketBefore.revealedPool0)} USDC`);
+    console.log(`  Pool 1 (Harris): ${fmtUsdc(marketBefore.revealedPool1)} USDC`);
+    console.log(`  Pool 2 (DeSant): ${fmtUsdc(marketBefore.revealedPool2)} USDC`);
+    console.log(`  Pool 3 (Obama):  ${fmtUsdc(marketBefore.revealedPool3)} USDC`);
     console.log(`  Num outcomes: ${marketBefore.numOutcomes}`);
 
     const outcomeValue = WINNING_OUTCOME; // 0 = Donald Trump wins

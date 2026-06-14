@@ -68,7 +68,6 @@ const BETTOR_CONFIG = [
 ] as const;
 
 const COMP_DEFS = [
-  { circuit: "init_market_yesno", method: "initInitMarketYesnoCompDef" as any },
   { circuit: "place_private_bet_yesno", method: "initPlaceBetYesnoCompDef" as any },
   { circuit: "reveal_market_outcome_yesno", method: "initRevealYesnoCompDef" as any },
   { circuit: "compute_yesno_payout", method: "initPayoutYesnoCompDef" as any },
@@ -540,52 +539,9 @@ describe("yes_no_e2e", function () {
     // Wait for Arcium MXE cluster to finish key agreement
     const mxePubKey = await waitForMxeReady(provider);
 
-    // Bootstrap valid zero-encrypted pool ciphertexts via the init_market_yesno circuit.
-    // Raw [0u8;32] bytes are NOT valid ciphertexts; to_arcis() on them returns garbage.
-    // This MUST happen before the first bet so the circuit reads meaningful pool values.
-    console.log(`\n  Bootstrapping encrypted pool ciphertexts (init_market_yesno)...`);
-    const initPoolsOffset = new BN(Date.now());
-    const initPoolsSig = await (program.methods as any)
-      .initMarketPoolsYesno(initPoolsOffset)
-      .accountsPartial({
-        payer: payer.publicKey,
-        signPdaAccount: findSignPdaAccount(),
-        mxeAccount: getMXEAccAddress(PROGRAM_ID),
-        mempoolAccount: getMempoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
-        executingPool: getExecutingPoolAccAddress(ARCIUM_ENV!.arciumClusterOffset),
-        computationAccount: getComputationAccAddress(
-          ARCIUM_ENV!.arciumClusterOffset,
-          initPoolsOffset as any,
-        ),
-        compDefAccount: getCompDefAccAddress(
-          PROGRAM_ID,
-          Buffer.from(getCompDefAccOffset("init_market_yesno")).readUInt32LE(),
-        ),
-        clusterAccount: getClusterAccAddress(ARCIUM_ENV!.arciumClusterOffset),
-        poolAccount: getFeePoolAccAddress(),
-        clockAccount: getClockAccAddress(),
-        systemProgram: SystemProgram.programId,
-        arciumProgram: ARCIUM_PROGRAM_ID,
-        market: marketPda,
-      })
-      .signers([payer])
-      .rpc({ commitment: "confirmed" });
-    console.log(`  ✓ initMarketPoolsYesno tx: ${initPoolsSig}`);
-
-    const initPoolsCbSig = await awaitComputationFinalization(
-      provider,
-      initPoolsOffset,
-      PROGRAM_ID,
-      "confirmed",
-      CALLBACK_TIMEOUT_MS,
-    );
-    console.log(`  ✓ initMarketPoolsYesno callback: ${initPoolsCbSig}`);
-
-    const mktAfterInit: any = await program.account.market.fetch(marketPda);
-    const poolsNonZero =
-      mktAfterInit.encryptedPool0.some((b: number) => b !== 0) ||
-      mktAfterInit.encryptedPool1.some((b: number) => b !== 0);
-    console.log(`  ✓ Encrypted pools bootstrapped (non-zero ciphertexts: ${poolsNonZero})`);
+    // Pools start at 0 on-chain (revealed_pool_0/1) and accumulate with each bet callback.
+    // No init step needed — plaintext pools are valid from market creation.
+    console.log(`\n  Pools start at 0; accumulate with each bet callback (no init needed).`);
 
     // Bets are placed ONE AT A TIME — each waits for its Arcium callback before
     // the next bet is submitted.  This is required because each bet computation
@@ -606,6 +562,12 @@ describe("yes_no_e2e", function () {
         encryptBetInput(netAmount, u.side, mxePubKey);
 
       const computationOffset = new BN(Date.now() + i * 100);
+
+      // Log pre-bet market state (what the circuit will receive)
+      {
+        const mktPre: any = await program.account.market.fetch(marketPda);
+        console.log(`  [PRE-BET] yes_pool=${fmtUsdc(mktPre.revealedPool0)} no_pool=${fmtUsdc(mktPre.revealedPool1)}`);
+      }
 
       console.log(
         `  ${u.name} (${u.side === 1 ? "YES" : "NO"}): ` +
@@ -692,6 +654,10 @@ describe("yes_no_e2e", function () {
           `    ${u.name} (${u.side === 1 ? "YES" : "NO"}): ` +
             `entry_odds=${pos.entryOdds.toString()}, claimed=${pos.claimed}`,
         );
+
+        // Diagnostic: print plaintext pool state to track pool accumulation
+        const mktDbg: any = await program.account.market.fetch(marketPda);
+        console.log(`    [DBG] yes_pool=${fmtUsdc(mktDbg.revealedPool0)} no_pool=${fmtUsdc(mktDbg.revealedPool1)}`);
       } catch (e: any) {
         console.log(`    ℹ callback timeout/error: ${e.message}`);
       }
@@ -755,8 +721,8 @@ describe("yes_no_e2e", function () {
     const marketBefore: any = await program.account.market.fetch(marketPda);
     console.log(`  Market state before: ${marketBefore.state} (0=Active)`);
     console.log(`  Total bets: ${marketBefore.totalBetsCount.toString()}`);
-    console.log(`  Encrypted pool_0: ${Buffer.from(marketBefore.encryptedPool0).toString("hex").slice(0, 16)}...`);
-    console.log(`  Encrypted pool_1: ${Buffer.from(marketBefore.encryptedPool1).toString("hex").slice(0, 16)}...`);
+    console.log(`  YES pool: ${fmtUsdc(marketBefore.revealedPool0)} USDC`);
+    console.log(`  NO pool:  ${fmtUsdc(marketBefore.revealedPool1)} USDC`);
 
     // Resolve as YES (outcome=1)
     const computationOffset = new BN(Date.now());

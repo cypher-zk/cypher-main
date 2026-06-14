@@ -11,16 +11,12 @@ declare_id!("F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc");
 
 // comp def offsets for yes/no market operations
 
-const COMP_DEF_OFFSET_INIT_MARKET_YESNO: u32 = comp_def_offset("init_market_yesno");
 const COMP_DEF_OFFSET_PLACE_BET_YESNO: u32 = comp_def_offset("place_private_bet_yesno");
 const COMP_DEF_OFFSET_REVEAL_YESNO: u32 = comp_def_offset("reveal_market_outcome_yesno");
 const COMP_DEF_OFFSET_PAYOUT_YESNO: u32 = comp_def_offset("compute_yesno_payout");
 const COMP_DEF_OFFSET_REFUND_YESNO: u32 = comp_def_offset("compute_yesno_refund");
 
-// comp def offsets for multioutcome market opertaions
-
 // ── MultiOutcome comp def offsets ────────────────────────────────────────────
-const COMP_DEF_OFFSET_INIT_MARKET_MULTI: u32 = comp_def_offset("init_market_multi");
 const COMP_DEF_OFFSET_PLACE_BET_MULTI: u32 = comp_def_offset("place_private_bet_multi");
 const COMP_DEF_OFFSET_REVEAL_MULTI: u32 = comp_def_offset("reveal_market_outcome_multi");
 const COMP_DEF_OFFSET_PAYOUT_MULTI: u32 = comp_def_offset("compute_multi_payout");
@@ -50,10 +46,6 @@ pub mod cypher {
 
     // init def accounts for yes/no market operations
 
-    pub fn init_init_market_yesno_comp_def(ctx: Context<InitInitMarketYesnoCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
-        Ok(())
-    }
     pub fn init_place_bet_yesno_comp_def(ctx: Context<InitPlaceBetYesnoCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
         Ok(())
@@ -73,10 +65,6 @@ pub mod cypher {
 
     // init def accounts for multioutcome market operations
 
-    pub fn init_init_market_multi_comp_def(ctx: Context<InitInitMarketMultiCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
-        Ok(())
-    }
     pub fn init_place_bet_multi_comp_def(ctx: Context<InitPlaceBetMultiCompDef>) -> Result<()> {
         init_computation_def(ctx.accounts, None)?;
         Ok(())
@@ -407,59 +395,6 @@ pub mod cypher {
         Ok(())
     }
 
-    // Bootstrap valid zero-encrypted pool ciphertexts for a newly created YesNo market.
-    // Must be called once after create_market before any bets can be placed.
-    pub fn init_market_pools_yesno(
-        ctx: Context<InitMarketPoolsYesno>,
-        computation_offset: u64,
-    ) -> Result<()> {
-        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
-
-        let m = &ctx.accounts.market;
-        let args = ArgBuilder::new()
-            .plaintext_u128(m.mxe_nonce)
-            .encrypted_u64(m.encrypted_pool_0)
-            .encrypted_u64(m.encrypted_pool_1)
-            .build();
-
-        queue_computation(
-            ctx.accounts,
-            computation_offset,
-            args,
-            vec![InitMarketYesnoCallback::callback_ix(
-                computation_offset,
-                &ctx.accounts.mxe_account,
-                &[ArciumCallbackAccount {
-                    pubkey: ctx.accounts.market.key(),
-                    is_writable: true,
-                }],
-            )?],
-            1,
-            0,
-        )?;
-        Ok(())
-    }
-
-    #[arcium_callback(encrypted_ix = "init_market_yesno")]
-    pub fn init_market_yesno_callback(
-        ctx: Context<InitMarketYesnoCallback>,
-        output: SignedComputationOutputs<InitMarketYesnoOutput>,
-    ) -> Result<()> {
-        let o = match output.verify_output(
-            &ctx.accounts.cluster_account,
-            &ctx.accounts.computation_account,
-        ) {
-            Ok(InitMarketYesnoOutput { field_0 }) => field_0,
-            Err(_) => return Err(CypherError::ComputationVerificationFailed.into()),
-        };
-
-        let new_pools = &o;
-        ctx.accounts.market.encrypted_pool_0 = new_pools.ciphertexts[0];
-        ctx.accounts.market.encrypted_pool_1 = new_pools.ciphertexts[1];
-        ctx.accounts.market.mxe_nonce = new_pools.nonce;
-        Ok(())
-    }
-
     pub fn place_private_bet_yesno(
         ctx: Context<PlacePrivateBetYesno>,
         computation_offset: u64,
@@ -553,10 +488,14 @@ pub mod cypher {
         ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
 
         let m = &ctx.accounts.market;
+        msg!(
+            "CYPHER_DBG bet_ix: yes_pool={} no_pool={}",
+            m.revealed_pool_0,
+            m.revealed_pool_1,
+        );
         let args = ArgBuilder::new()
-            .plaintext_u128(m.mxe_nonce)
-            .encrypted_u64(m.encrypted_pool_0)
-            .encrypted_u64(m.encrypted_pool_1)
+            .plaintext_u64(m.revealed_pool_0)
+            .plaintext_u64(m.revealed_pool_1)
             .x25519_pubkey(pub_key)
             .plaintext_u128(nonce)
             .encrypted_u64(encrypted_amount)
@@ -600,12 +539,19 @@ pub mod cypher {
             Err(_) => return Err(CypherError::ComputationVerificationFailed.into()),
         };
 
-        let new_pools = &o.field_0;
-        let entry_odds = o.field_1;
+        let new_yes = o.field_0;
+        let new_no = o.field_1;
+        let entry_odds = o.field_2;
 
-        ctx.accounts.market.encrypted_pool_0 = new_pools.ciphertexts[0];
-        ctx.accounts.market.encrypted_pool_1 = new_pools.ciphertexts[1];
-        ctx.accounts.market.mxe_nonce = new_pools.nonce;
+        msg!(
+            "CYPHER_DBG bet_callback: new_yes={} new_no={} odds={}",
+            new_yes,
+            new_no,
+            entry_odds,
+        );
+
+        ctx.accounts.market.revealed_pool_0 = new_yes;
+        ctx.accounts.market.revealed_pool_1 = new_no;
         ctx.accounts.market.total_bets_count = ctx
             .accounts
             .market
@@ -622,62 +568,6 @@ pub mod cypher {
             nonce: ctx.accounts.position.nonce,
             entry_odds,
         });
-        Ok(())
-    }
-
-    // Bootstrap valid zero-encrypted pool ciphertexts for a newly created MultiOutcome market.
-    pub fn init_market_pools_multi(
-        ctx: Context<InitMarketPoolsMulti>,
-        computation_offset: u64,
-    ) -> Result<()> {
-        ctx.accounts.sign_pda_account.bump = ctx.bumps.sign_pda_account;
-
-        let m = &ctx.accounts.market;
-        let args = ArgBuilder::new()
-            .plaintext_u128(m.mxe_nonce)
-            .encrypted_u64(m.encrypted_pool_0)
-            .encrypted_u64(m.encrypted_pool_1)
-            .encrypted_u64(m.encrypted_pool_2)
-            .encrypted_u64(m.encrypted_pool_3)
-            .build();
-
-        queue_computation(
-            ctx.accounts,
-            computation_offset,
-            args,
-            vec![InitMarketMultiCallback::callback_ix(
-                computation_offset,
-                &ctx.accounts.mxe_account,
-                &[ArciumCallbackAccount {
-                    pubkey: ctx.accounts.market.key(),
-                    is_writable: true,
-                }],
-            )?],
-            1,
-            0,
-        )?;
-        Ok(())
-    }
-
-    #[arcium_callback(encrypted_ix = "init_market_multi")]
-    pub fn init_market_multi_callback(
-        ctx: Context<InitMarketMultiCallback>,
-        output: SignedComputationOutputs<InitMarketMultiOutput>,
-    ) -> Result<()> {
-        let o = match output.verify_output(
-            &ctx.accounts.cluster_account,
-            &ctx.accounts.computation_account,
-        ) {
-            Ok(InitMarketMultiOutput { field_0 }) => field_0,
-            Err(_) => return Err(CypherError::ComputationVerificationFailed.into()),
-        };
-
-        let new_pools = &o;
-        ctx.accounts.market.encrypted_pool_0 = new_pools.ciphertexts[0];
-        ctx.accounts.market.encrypted_pool_1 = new_pools.ciphertexts[1];
-        ctx.accounts.market.encrypted_pool_2 = new_pools.ciphertexts[2];
-        ctx.accounts.market.encrypted_pool_3 = new_pools.ciphertexts[3];
-        ctx.accounts.market.mxe_nonce = new_pools.nonce;
         Ok(())
     }
 
@@ -782,13 +672,10 @@ pub mod cypher {
 
         let m = &ctx.accounts.market;
         let args = ArgBuilder::new()
-            // Enc<Mxe, MultiPools> — ONE shared nonce for all 4 pool ciphertexts
-            .plaintext_u128(m.mxe_nonce)
-            .encrypted_u64(m.encrypted_pool_0)
-            .encrypted_u64(m.encrypted_pool_1)
-            .encrypted_u64(m.encrypted_pool_2)
-            .encrypted_u64(m.encrypted_pool_3)
-            // Enc<Shared, BetInput>
+            .plaintext_u64(m.revealed_pool_0)
+            .plaintext_u64(m.revealed_pool_1)
+            .plaintext_u64(m.revealed_pool_2)
+            .plaintext_u64(m.revealed_pool_3)
             .x25519_pubkey(pub_key)
             .plaintext_u128(nonce)
             .encrypted_u64(encrypted_amount)
@@ -826,17 +713,17 @@ pub mod cypher {
             Err(_) => return Err(CypherError::ComputationVerificationFailed.into()),
         };
 
-        // field_0.field_0 = MXEEncryptedStruct<4> — new pool ciphertexts
-        // field_0.field_1 = u64 — entry_odds (revealed)
-        let new_pools = &o.field_0;
-        let entry_odds = o.field_1;
+        let new_p0 = o.field_0;
+        let new_p1 = o.field_1;
+        let new_p2 = o.field_2;
+        let new_p3 = o.field_3;
+        let entry_odds = o.field_4;
 
         let m = &mut ctx.accounts.market;
-        m.encrypted_pool_0 = new_pools.ciphertexts[0];
-        m.encrypted_pool_1 = new_pools.ciphertexts[1];
-        m.encrypted_pool_2 = new_pools.ciphertexts[2];
-        m.encrypted_pool_3 = new_pools.ciphertexts[3];
-        m.mxe_nonce = new_pools.nonce;
+        m.revealed_pool_0 = new_p0;
+        m.revealed_pool_1 = new_p1;
+        m.revealed_pool_2 = new_p2;
+        m.revealed_pool_3 = new_p3;
         m.total_bets_count = m
             .total_bets_count
             .checked_add(1)
@@ -878,9 +765,8 @@ pub mod cypher {
 
         let m = &ctx.accounts.market;
         let args = ArgBuilder::new()
-            .plaintext_u128(m.mxe_nonce)
-            .encrypted_u64(m.encrypted_pool_0)
-            .encrypted_u64(m.encrypted_pool_1)
+            .plaintext_u64(m.revealed_pool_0)
+            .plaintext_u64(m.revealed_pool_1)
             .plaintext_u8(outcome_value)
             .build();
 
@@ -971,12 +857,10 @@ pub mod cypher {
 
         let m = &ctx.accounts.market;
         let args = ArgBuilder::new()
-            // Enc<Mxe, MultiPools> — ONE shared nonce for all 4 pool ciphertexts
-            .plaintext_u128(m.mxe_nonce)
-            .encrypted_u64(m.encrypted_pool_0)
-            .encrypted_u64(m.encrypted_pool_1)
-            .encrypted_u64(m.encrypted_pool_2)
-            .encrypted_u64(m.encrypted_pool_3)
+            .plaintext_u64(m.revealed_pool_0)
+            .plaintext_u64(m.revealed_pool_1)
+            .plaintext_u64(m.revealed_pool_2)
+            .plaintext_u64(m.revealed_pool_3)
             .plaintext_u8(outcome_value)
             .build();
 
@@ -1601,46 +1485,6 @@ pub struct AdminClaimRemaining<'info> {
 
 // Init Comp Def contexts
 
-#[init_computation_definition_accounts("init_market_yesno", payer)]
-#[derive(Accounts)]
-pub struct InitInitMarketYesnoCompDef<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    #[account(mut, address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut)]
-    /// CHECK: comp_def_account, checked by arcium program.
-    pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
-    /// CHECK: address_lookup_table, checked by arcium program.
-    pub address_lookup_table: UncheckedAccount<'info>,
-    #[account(address = LUT_PROGRAM_ID)]
-    /// CHECK: lut_program is the Address Lookup Table program.
-    pub lut_program: UncheckedAccount<'info>,
-    pub arcium_program: Program<'info, Arcium>,
-    pub system_program: Program<'info, System>,
-}
-
-#[init_computation_definition_accounts("init_market_multi", payer)]
-#[derive(Accounts)]
-pub struct InitInitMarketMultiCompDef<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    #[account(mut, address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut)]
-    /// CHECK: comp_def_account, checked by arcium program.
-    pub comp_def_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_mxe_lut_pda!(mxe_account.lut_offset_slot))]
-    /// CHECK: address_lookup_table, checked by arcium program.
-    pub address_lookup_table: UncheckedAccount<'info>,
-    #[account(address = LUT_PROGRAM_ID)]
-    /// CHECK: lut_program is the Address Lookup Table program.
-    pub lut_program: UncheckedAccount<'info>,
-    pub arcium_program: Program<'info, Arcium>,
-    pub system_program: Program<'info, System>,
-}
-
 #[init_computation_definition_accounts("place_private_bet_yesno", payer)]
 #[derive(Accounts)]
 pub struct InitPlaceBetYesnoCompDef<'info> {
@@ -1719,140 +1563,6 @@ pub struct InitRefundYesnoCompDef<'info> {
     pub lut_program: UncheckedAccount<'info>,
     pub arcium_program: Program<'info, Arcium>,
     pub system_program: Program<'info, System>,
-}
-
-// InitMarketPoolsYesno
-
-#[queue_computation_accounts("init_market_yesno", payer)]
-#[derive(Accounts)]
-#[instruction(computation_offset: u64)]
-pub struct InitMarketPoolsYesno<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    #[account(
-        init_if_needed, space = 9, payer = payer,
-        seeds = [&SIGN_PDA_SEED], bump,
-        address = derive_sign_pda!(),
-    )]
-    pub sign_pda_account: Box<Account<'info, ArciumSignerAccount>>,
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut, address = derive_mempool_pda!(mxe_account))]
-    /// CHECK: mempool_account, checked by the arcium program.
-    pub mempool_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_execpool_pda!(mxe_account))]
-    /// CHECK: executing_pool, checked by the arcium program.
-    pub executing_pool: UncheckedAccount<'info>,
-    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
-    /// CHECK: computation_account, checked by the arcium program.
-    pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_MARKET_YESNO))]
-    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
-    #[account(mut, address = derive_cluster_pda!(mxe_account))]
-    pub cluster_account: Box<Account<'info, Cluster>>,
-    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
-    pub pool_account: Box<Account<'info, FeePool>>,
-    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
-    pub clock_account: Box<Account<'info, ClockAccount>>,
-    pub system_program: Program<'info, System>,
-    pub arcium_program: Program<'info, Arcium>,
-    // Custom
-    #[account(
-        mut,
-        seeds = [b"market", market.market_id.to_le_bytes().as_ref()],
-        bump = market.bump,
-        constraint = market.creator == payer.key() @ CypherError::NotMarketCreator,
-        constraint = market.market_type == MARKET_TYPE_YESNO @ CypherError::WrongMarketType,
-        constraint = market.total_bets_count == 0 && market.mxe_nonce == 0 @ CypherError::MarketAlreadyInitialized,
-    )]
-    pub market: Box<Account<'info, Market>>,
-}
-
-#[callback_accounts("init_market_yesno")]
-#[derive(Accounts)]
-pub struct InitMarketYesnoCallback<'info> {
-    pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_MARKET_YESNO))]
-    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: computation_account, checked by arcium program via constraints in the callback context.
-    pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_cluster_pda!(mxe_account))]
-    pub cluster_account: Account<'info, Cluster>,
-    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
-    /// CHECK: instructions_sysvar, checked by the account constraint.
-    pub instructions_sysvar: UncheckedAccount<'info>,
-    // Custom
-    #[account(mut)]
-    pub market: Box<Account<'info, Market>>,
-}
-
-// InitMarketPoolsMulti
-
-#[queue_computation_accounts("init_market_multi", payer)]
-#[derive(Accounts)]
-#[instruction(computation_offset: u64)]
-pub struct InitMarketPoolsMulti<'info> {
-    #[account(mut)]
-    pub payer: Signer<'info>,
-    #[account(
-        init_if_needed, space = 9, payer = payer,
-        seeds = [&SIGN_PDA_SEED], bump,
-        address = derive_sign_pda!(),
-    )]
-    pub sign_pda_account: Box<Account<'info, ArciumSignerAccount>>,
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Box<Account<'info, MXEAccount>>,
-    #[account(mut, address = derive_mempool_pda!(mxe_account))]
-    /// CHECK: mempool_account, checked by the arcium program.
-    pub mempool_account: UncheckedAccount<'info>,
-    #[account(mut, address = derive_execpool_pda!(mxe_account))]
-    /// CHECK: executing_pool, checked by the arcium program.
-    pub executing_pool: UncheckedAccount<'info>,
-    #[account(mut, address = derive_comp_pda!(computation_offset, mxe_account))]
-    /// CHECK: computation_account, checked by the arcium program.
-    pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_MARKET_MULTI))]
-    pub comp_def_account: Box<Account<'info, ComputationDefinitionAccount>>,
-    #[account(mut, address = derive_cluster_pda!(mxe_account))]
-    pub cluster_account: Box<Account<'info, Cluster>>,
-    #[account(mut, address = ARCIUM_FEE_POOL_ACCOUNT_ADDRESS)]
-    pub pool_account: Box<Account<'info, FeePool>>,
-    #[account(mut, address = ARCIUM_CLOCK_ACCOUNT_ADDRESS)]
-    pub clock_account: Box<Account<'info, ClockAccount>>,
-    pub system_program: Program<'info, System>,
-    pub arcium_program: Program<'info, Arcium>,
-    // Custom
-    #[account(
-        mut,
-        seeds = [b"market", market.market_id.to_le_bytes().as_ref()],
-        bump = market.bump,
-        constraint = market.creator == payer.key() @ CypherError::NotMarketCreator,
-        constraint = market.market_type == MARKET_TYPE_MULTIOUTCOME @ CypherError::WrongMarketType,
-        constraint = market.total_bets_count == 0 && market.mxe_nonce == 0 @ CypherError::MarketAlreadyInitialized,
-    )]
-    pub market: Box<Account<'info, Market>>,
-}
-
-#[callback_accounts("init_market_multi")]
-#[derive(Accounts)]
-pub struct InitMarketMultiCallback<'info> {
-    pub arcium_program: Program<'info, Arcium>,
-    #[account(address = derive_comp_def_pda!(COMP_DEF_OFFSET_INIT_MARKET_MULTI))]
-    pub comp_def_account: Account<'info, ComputationDefinitionAccount>,
-    #[account(address = derive_mxe_pda!())]
-    pub mxe_account: Account<'info, MXEAccount>,
-    /// CHECK: computation_account, checked by arcium program via constraints in the callback context.
-    pub computation_account: UncheckedAccount<'info>,
-    #[account(address = derive_cluster_pda!(mxe_account))]
-    pub cluster_account: Account<'info, Cluster>,
-    #[account(address = ::arcium_anchor::solana_instructions_sysvar::ID)]
-    /// CHECK: instructions_sysvar, checked by the account constraint.
-    pub instructions_sysvar: UncheckedAccount<'info>,
-    // Custom
-    #[account(mut)]
-    pub market: Box<Account<'info, Market>>,
 }
 
 // PlacePrivateBetYesno
