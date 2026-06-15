@@ -2,6 +2,14 @@ use anchor_lang::prelude::*;
 
 // CYPHER — states.rs   (YesNo + MultiOutcome)
 
+/// The only SPL mint accepted for bets. Selected at compile time via build.rs:
+///   `CYPHER_CLUSTER=mainnet` → Circle USDC
+///   anything else (default)  → Cypher Coin (CSDC) on devnet
+#[cfg(cypher_mainnet)]
+pub const ACCEPTED_MINT: Pubkey = pubkey!("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+#[cfg(not(cypher_mainnet))]
+pub const ACCEPTED_MINT: Pubkey = pubkey!("8AF9BABNWwEhipRxtXPYoWSZW24SKjUn6YqbKd9ZqhwB");
+
 // SPACE CONSTANTS
 
 pub const GLOBAL_STATE_SPACE: usize = 8   // discriminator
@@ -364,6 +372,8 @@ pub enum CypherError {
     WrongMarketType,
     #[msg("Mint does not match accepted mint")]
     WrongMint,
+    #[msg("Mint is not the protocol-accepted mint for this cluster")]
+    NotAcceptedMint,
     #[msg("Invalid category — must be 0-6")]
     InvalidCategory,
 }

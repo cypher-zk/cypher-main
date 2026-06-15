@@ -1553,6 +1553,7 @@ pub struct Initialize<'info> {
     pub global_state: Box<Account<'info, GlobalState>>, // ← boxed
     /// CHECK: treasury wallet — no type checks needed
     pub protocol_treasury: UncheckedAccount<'info>,
+    #[account(address = ACCEPTED_MINT @ CypherError::NotAcceptedMint)]
     pub accepted_mint: InterfaceAccount<'info, Mint>,
     pub system_program: Program<'info, System>,
 }
@@ -1568,6 +1569,7 @@ pub struct UpdateAcceptedMint<'info> {
         has_one = admin @ CypherError::UnauthorizedAdmin,
     )]
     pub global_state: Box<Account<'info, GlobalState>>,
+    #[account(address = ACCEPTED_MINT @ CypherError::NotAcceptedMint)]
     pub new_mint: InterfaceAccount<'info, Mint>,
     /// CHECK: treasury wallet — validated only as a token account for the new mint off-chain
     pub new_treasury: UncheckedAccount<'info>,
@@ -1627,7 +1629,10 @@ pub struct CancelMarket<'info> {
         bump = lp_position.bump,
     )]
     pub lp_position: Box<Account<'info, LPPosition>>, // ← boxed
-    #[account(mut, constraint = creator_token_account.owner == creator.key())]
+    #[account(mut,
+        constraint = creator_token_account.owner == creator.key(),
+        constraint = creator_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub creator_token_account: Box<Account<'info, TokenAccount>>, // ← boxed
     pub token_program: Program<'info, Token>,
 }
@@ -1649,7 +1654,10 @@ pub struct WithdrawCreatorFunds<'info> {
     pub lp_position: Box<Account<'info, LPPosition>>, // ← boxed
     #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
     pub market_vault: Box<Account<'info, TokenAccount>>, // ← boxed
-    #[account(mut, constraint = creator_token_account.owner == creator.key())]
+    #[account(mut,
+        constraint = creator_token_account.owner == creator.key(),
+        constraint = creator_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub creator_token_account: Box<Account<'info, TokenAccount>>, // ← boxed
     pub token_program: Program<'info, Token>,
 }
@@ -1665,7 +1673,10 @@ pub struct AdminClaimRemaining<'info> {
     pub market: Box<Account<'info, Market>>, // ← boxed
     #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
     pub market_vault: Box<Account<'info, TokenAccount>>, // ← boxed
-    #[account(mut, constraint = protocol_treasury.key() == global_state.protocol_treasury)]
+    #[account(mut,
+        constraint = protocol_treasury.key() == global_state.protocol_treasury,
+        constraint = protocol_treasury.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub protocol_treasury: Box<Account<'info, TokenAccount>>, // ← boxed
     pub token_program: Program<'info, Token>,
 }
@@ -1942,7 +1953,10 @@ pub struct ClaimPayoutYesno<'info> {
     pub position: Box<Account<'info, EncryptedPosition>>, // ← boxed
     #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
     pub market_vault: Box<Account<'info, TokenAccount>>,
-    #[account(mut, constraint = user_token_account.owner == user.key())]
+    #[account(mut,
+        constraint = user_token_account.owner == user.key(),
+        constraint = user_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub user_token_account: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
 }
@@ -1972,7 +1986,10 @@ pub struct ComputeYesnoPayoutCallback<'info> {
     pub market: Box<Account<'info, Market>>, // ← boxed
     #[account(mut)]
     pub market_vault: Box<Account<'info, TokenAccount>>, // ← boxed
-    #[account(mut, constraint = user_token_account.owner == user.key())]
+    #[account(mut,
+        constraint = user_token_account.owner == user.key(),
+        constraint = user_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub user_token_account: Box<Account<'info, TokenAccount>>, // ← boxed
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -2020,7 +2037,10 @@ pub struct ClaimRefundYesno<'info> {
     pub position: Box<Account<'info, EncryptedPosition>>, // ← boxed
     #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
     pub market_vault: Box<Account<'info, TokenAccount>>,
-    #[account(mut, constraint = user_token_account.owner == user.key())]
+    #[account(mut,
+        constraint = user_token_account.owner == user.key(),
+        constraint = user_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub user_token_account: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
 }
@@ -2050,7 +2070,10 @@ pub struct ComputeYesnoRefundCallback<'info> {
     pub market: Box<Account<'info, Market>>, // ← boxed
     #[account(mut)]
     pub market_vault: Box<Account<'info, TokenAccount>>, // ← boxed
-    #[account(mut, constraint = user_token_account.owner == user.key())]
+    #[account(mut,
+        constraint = user_token_account.owner == user.key(),
+        constraint = user_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub user_token_account: Box<Account<'info, TokenAccount>>, // ← boxed
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -2366,7 +2389,10 @@ pub struct ClaimPayoutMulti<'info> {
     pub position: Box<Account<'info, EncryptedPosition>>,
     #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
     pub market_vault: Box<Account<'info, TokenAccount>>,
-    #[account(mut, constraint = user_token_account.owner == user.key())]
+    #[account(mut,
+        constraint = user_token_account.owner == user.key(),
+        constraint = user_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub user_token_account: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
 }
@@ -2394,7 +2420,10 @@ pub struct ComputeMultiPayoutCallback<'info> {
     pub market: Box<Account<'info, Market>>,
     #[account(mut)]
     pub market_vault: Box<Account<'info, TokenAccount>>,
-    #[account(mut, constraint = user_token_account.owner == user.key())]
+    #[account(mut,
+        constraint = user_token_account.owner == user.key(),
+        constraint = user_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub user_token_account: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -2442,7 +2471,10 @@ pub struct ClaimRefundMulti<'info> {
     pub position: Box<Account<'info, EncryptedPosition>>,
     #[account(mut, seeds = [b"market_vault", market.key().as_ref()], bump = market.vault_bump)]
     pub market_vault: Box<Account<'info, TokenAccount>>,
-    #[account(mut, constraint = user_token_account.owner == user.key())]
+    #[account(mut,
+        constraint = user_token_account.owner == user.key(),
+        constraint = user_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub user_token_account: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
 }
@@ -2470,7 +2502,10 @@ pub struct ComputeMultiRefundCallback<'info> {
     pub market: Box<Account<'info, Market>>,
     #[account(mut)]
     pub market_vault: Box<Account<'info, TokenAccount>>,
-    #[account(mut, constraint = user_token_account.owner == user.key())]
+    #[account(mut,
+        constraint = user_token_account.owner == user.key(),
+        constraint = user_token_account.mint == ACCEPTED_MINT @ CypherError::WrongMint,
+    )]
     pub user_token_account: Box<Account<'info, TokenAccount>>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
