@@ -7,8 +7,13 @@ A confidential Solana app built with Arcium: an Anchor program queues computatio
 ```bash
 arcium build                          # devnet — accepts CSDC (8AF9BABNWwEhipRxtXPYoWSZW24SKjUn6YqbKd9ZqhwB)
 CYPHER_CLUSTER=mainnet arcium build   # mainnet — accepts USDC (EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v)
-arcium test
+
+# Local e2e — synthesizes a CSDC mint owned by your test wallet and pre-loads
+# it into solana-test-validator, then runs the suite.
+yarn test:local
 ```
+
+The pre-load is wired via `[[test.validator.account]]` in `Anchor.toml` pointing at `tests/fixtures/csdc_mint.json`. `scripts/setup-csdc-mint.ts` writes that file with your `~/.config/solana/id.json` wallet as `mint_authority` so the tests can `mintTo` freely. Re-run `yarn setup:mint` if you rotate the wallet.
 
 ## Accepted bet token
 

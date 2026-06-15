@@ -4,6 +4,8 @@
     "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
     "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
     "init:comp-defs": "npx ts-node -P tsconfig.json scripts/init_comp_defs.ts",
+    "setup:mint": "npx ts-node -P scripts/tsconfig.json scripts/setup-csdc-mint.ts",
+    "test:local": "yarn setup:mint && arcium test",
     "e2e": "npx ts-node -P tsconfig.json scripts/e2e_yesno.ts",
     "devnet:yesno": "npx ts-node -P tsconfig.json scripts/devnet_yesno_e2e.ts",
     "devnet:multi": "npx ts-node -P tsconfig.json scripts/devnet_multi_e2e.ts",

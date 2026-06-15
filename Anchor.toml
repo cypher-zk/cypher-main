@@ -29,3 +29,12 @@ upgradeable = false
 bind_address = "127.0.0.1"
 ledger = ".anchor/test-ledger"
 rpc_port = 8899
+
+# Pre-load the CSDC mint at the address the program pins via `ACCEPTED_MINT`
+# so `arcium test` / `anchor test` can satisfy the on-chain constraints
+# without a devnet round-trip. Regenerate the file when the test wallet at
+# ~/.config/solana/id.json changes:
+#   yarn setup:mint
+[[test.validator.account]]
+address = "8AF9BABNWwEhipRxtXPYoWSZW24SKjUn6YqbKd9ZqhwB"
+filename = "tests/fixtures/csdc_mint.json"

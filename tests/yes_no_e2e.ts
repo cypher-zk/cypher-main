@@ -11,7 +11,6 @@ import {
   TOKEN_PROGRAM_ID,
   getAccount,
   createAccount,
-  createMint,
   mintTo,
 } from "@solana/spl-token";
 import {
@@ -42,6 +41,12 @@ import * as fs from "fs";
 
 const PROGRAM_ID = new PublicKey(
   "cyphPe923pnPGVXJL3a3P7t2W9mJsagBcg1oeauoh2B",
+);
+// CSDC mint pinned by ACCEPTED_MINT in programs/cypher_main/src/states.rs
+// (non-mainnet build). Pre-loaded as a genesis account via Anchor.toml's
+// [[test.validator.account]] block — see scripts/setup-csdc-mint.ts.
+const CSDC_MINT = new PublicKey(
+  "8AF9BABNWwEhipRxtXPYoWSZW24SKjUn6YqbKd9ZqhwB",
 );
 const ARCIUM_PROGRAM_ID = getArciumProgramId();
 const ARCIUM_ENV = (() => {
@@ -291,11 +296,10 @@ describe("yes_no_e2e", function () {
       console.log(`  Treasury:    ${treasury.toBase58()}`);
       console.log(`  Market counter: ${marketIndex}`);
     } else {
-      console.log(`  Creating fresh USDC mint...`);
-
-      // Create USDC mint
-      usdcMint = await createMint(connection, payer, payer.publicKey, null, 6);
-      console.log(`  Mint:        ${usdcMint.toBase58()}`);
+      // Use the pre-loaded CSDC mint (test wallet is mint_authority via
+      // scripts/setup-csdc-mint.ts + Anchor.toml's [[test.validator.account]]).
+      usdcMint = CSDC_MINT;
+      console.log(`  Mint:        ${usdcMint.toBase58()} (pre-loaded CSDC)`);
 
       // Create treasury token account
       const treasuryKeypair = Keypair.generate();
