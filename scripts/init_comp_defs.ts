@@ -17,7 +17,7 @@ import {
   getLookupTableAddress,
   uploadCircuit,
 } from "@arcium-hq/client";
-import { CypherMain } from "../target/types/cypher_main";
+import { Cypher } from "../target/types/cypher";
 import * as fs from "fs";
 import * as os from "os";
 
@@ -32,9 +32,14 @@ const PROGRAM_ID = new PublicKey(
 
 // circuit name (used for PDA + circuit file) → Anchor method name on the program
 const CIRCUITS: { circuitName: string; methodName: string }[] = [
-  { circuitName: "settle_yesno", methodName: "initYesnoCompDef" },
-  { circuitName: "settle_multioutcome", methodName: "initMultioutcomeCompDef" },
-  { circuitName: "settle_accuracy", methodName: "initAccuracyCompDef" },
+  { circuitName: "place_private_bet_yesno",     methodName: "initPlaceBetYesnoCompDef" },
+  { circuitName: "reveal_market_outcome_yesno", methodName: "initRevealYesnoCompDef" },
+  { circuitName: "compute_yesno_payout",        methodName: "initPayoutYesnoCompDef" },
+  { circuitName: "compute_yesno_refund",        methodName: "initRefundYesnoCompDef" },
+  { circuitName: "place_private_bet_multi",     methodName: "initPlaceBetMultiCompDef" },
+  { circuitName: "reveal_market_outcome_multi", methodName: "initRevealMultiCompDef" },
+  { circuitName: "compute_multi_payout",        methodName: "initPayoutMultiCompDef" },
+  { circuitName: "compute_multi_refund",        methodName: "initRefundMultiCompDef" },
 ];
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -67,9 +72,9 @@ async function main() {
   anchor.setProvider(provider);
 
   const idl = JSON.parse(
-    fs.readFileSync("target/idl/cypher_main.json", "utf-8"),
+    fs.readFileSync("target/idl/cypher.json", "utf-8"),
   );
-  const program = new Program<CypherMain>(idl, provider);
+  const program = new Program<Cypher>(idl, provider);
   const arciumProgram = getArciumProgram(provider);
 
   // ── Preflight: verify MXE is initialized ────────────────────────────────────

@@ -41,7 +41,7 @@ import * as fs from "fs";
 // ─────────────────────────────────────────────────────────────────────────────
 
 const PROGRAM_ID = new PublicKey(
-  "F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc",
+  "cyphPe923pnPGVXJL3a3P7t2W9mJsagBcg1oeauoh2B",
 );
 const ARCIUM_PROGRAM_ID = getArciumProgramId();
 const ARCIUM_ENV = (() => {
