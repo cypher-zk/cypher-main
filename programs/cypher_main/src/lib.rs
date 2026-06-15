@@ -3,6 +3,8 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use anchor_spl::token_interface::Mint;
 use arcium_anchor::prelude::*;
 use arcium_client::idl::arcium::types::CallbackAccount as ArciumCallbackAccount;
+use arcium_client::idl::arcium::types::{CircuitSource, OffChainCircuitSource};
+use arcium_macros::circuit_hash;
 
 pub mod states;
 use states::*;
@@ -47,38 +49,86 @@ pub mod cypher {
     // init def accounts for yes/no market operations
 
     pub fn init_place_bet_yesno_comp_def(ctx: Context<InitPlaceBetYesnoCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+        init_computation_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: "https://peach-junior-crab-429.mypinata.cloud/ipfs/bafybeidmd2ibpamlzxzpulmoumvywav7axmog3rkcazfxacpyuab4kumry".to_string(),
+                hash: circuit_hash!("place_private_bet_yesno"),
+            })),
+        )?;
         Ok(())
     }
     pub fn init_reveal_yesno_comp_def(ctx: Context<InitRevealYesnoCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+        init_computation_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: "https://peach-junior-crab-429.mypinata.cloud/ipfs/bafkreiecxh2txlpjrdhdpk45iay4vvxc4kbh5adakvp5j2h6pehqf3fmti".to_string(),
+                hash: circuit_hash!("reveal_market_outcome_yesno"),
+            })),
+        )?;
         Ok(())
     }
     pub fn init_payout_yesno_comp_def(ctx: Context<InitPayoutYesnoCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+        init_computation_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: "https://peach-junior-crab-429.mypinata.cloud/ipfs/bafybeifg7csxnlbjrvdak6b4fp5evhlvzynrlti22p47htsdvisib4sk7q".to_string(),
+                hash: circuit_hash!("compute_yesno_payout"),
+            })),
+        )?;
         Ok(())
     }
     pub fn init_refund_yesno_comp_def(ctx: Context<InitRefundYesnoCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+        init_computation_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: "https://peach-junior-crab-429.mypinata.cloud/ipfs/bafybeiecs3zjx66uhlrzmvthlyimssfu6ic7po5vc2mopnbenw4wswc5qi".to_string(),
+                hash: circuit_hash!("compute_yesno_refund"),
+            })),
+        )?;
         Ok(())
     }
 
     // init def accounts for multioutcome market operations
 
     pub fn init_place_bet_multi_comp_def(ctx: Context<InitPlaceBetMultiCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+        init_computation_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: "https://peach-junior-crab-429.mypinata.cloud/ipfs/bafybeihi6vaepziz7wyblibsvysf3ju6s4qfhdav2oi64xqsgjpyw26syq".to_string(),
+                hash: circuit_hash!("place_private_bet_multi"),
+            })),
+        )?;
         Ok(())
     }
     pub fn init_reveal_multi_comp_def(ctx: Context<InitRevealMultiCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+        init_computation_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: "https://peach-junior-crab-429.mypinata.cloud/ipfs/bafkreidqyoym6l33ayjt6oxz7nws6xkaraumfkmduz263ew5so3omvi3j4".to_string(),
+                hash: circuit_hash!("reveal_market_outcome_multi"),
+            })),
+        )?;
         Ok(())
     }
     pub fn init_payout_multi_comp_def(ctx: Context<InitPayoutMultiCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+        init_computation_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: "https://peach-junior-crab-429.mypinata.cloud/ipfs/bafybeifg7csxnlbjrvdak6b4fp5evhlvzynrlti22p47htsdvisib4sk7q".to_string(),
+                hash: circuit_hash!("compute_multi_payout"),
+            })),
+        )?;
         Ok(())
     }
     pub fn init_refund_multi_comp_def(ctx: Context<InitRefundMultiCompDef>) -> Result<()> {
-        init_computation_def(ctx.accounts, None)?;
+        init_computation_def(
+            ctx.accounts,
+            Some(CircuitSource::OffChain(OffChainCircuitSource {
+                source: "https://peach-junior-crab-429.mypinata.cloud/ipfs/bafybeiecs3zjx66uhlrzmvthlyimssfu6ic7po5vc2mopnbenw4wswc5qi".to_string(),
+                hash: circuit_hash!("compute_multi_refund"),
+            })),
+        )?;
         Ok(())
     }
 
