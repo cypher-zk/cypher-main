@@ -23,20 +23,18 @@ import * as os from "os";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-const RPC_URL =
-  process.env.RPC_URL ||
-  "https://api.devnet.solana.com";
+const RPC_URL = process.env.RPC_URL || "https://api.devnet.solana.com";
 
 // Must match `declare_id!` in lib.rs for the devnet deployment.
 const PROGRAM_ID = new PublicKey(
-  "7JpiCk5c1jZdBC9moiUBQbAjdvCGqUhuMRn4r4FpSjV4"
+  "cyphPe923pnPGVXJL3a3P7t2W9mJsagBcg1oeauoh2B",
 );
 
 // circuit name (used for PDA + circuit file) → Anchor method name on the program
 const CIRCUITS: { circuitName: string; methodName: string }[] = [
-  { circuitName: "settle_yesno",        methodName: "initYesnoCompDef" },
+  { circuitName: "settle_yesno", methodName: "initYesnoCompDef" },
   { circuitName: "settle_multioutcome", methodName: "initMultioutcomeCompDef" },
-  { circuitName: "settle_accuracy",     methodName: "initAccuracyCompDef" },
+  { circuitName: "settle_accuracy", methodName: "initAccuracyCompDef" },
 ];
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -47,13 +45,16 @@ async function main() {
   const keypairPath =
     process.env.KEYPAIR_PATH || `${os.homedir()}/.config/solana/id.json`;
   const owner = Keypair.fromSecretKey(
-    new Uint8Array(JSON.parse(fs.readFileSync(keypairPath).toString()))
+    new Uint8Array(JSON.parse(fs.readFileSync(keypairPath).toString())),
   );
   console.log("Payer:", owner.publicKey.toBase58());
 
   const wallet = {
     publicKey: owner.publicKey,
-    signTransaction: async (tx: any) => { tx.partialSign(owner); return tx; },
+    signTransaction: async (tx: any) => {
+      tx.partialSign(owner);
+      return tx;
+    },
     signAllTransactions: async (txs: any[]) => {
       txs.forEach((tx) => tx.partialSign(owner));
       return txs;
@@ -66,7 +67,7 @@ async function main() {
   anchor.setProvider(provider);
 
   const idl = JSON.parse(
-    fs.readFileSync("target/idl/cypher_main.json", "utf-8")
+    fs.readFileSync("target/idl/cypher_main.json", "utf-8"),
   );
   const program = new Program<CypherMain>(idl, provider);
   const arciumProgram = getArciumProgram(provider);
@@ -95,7 +96,9 @@ Then re-run: yarn init:comp-defs
   }
 
   const baseSeed = getArciumAccountBaseSeed("ComputationDefinitionAccount");
-  const mxeAcc = await (arciumProgram.account as any).mxeAccount.fetch(mxeAddress);
+  const mxeAcc = await (arciumProgram.account as any).mxeAccount.fetch(
+    mxeAddress,
+  );
   const lutAddress = getLookupTableAddress(PROGRAM_ID, mxeAcc.lutOffsetSlot);
   console.log("MXE:           ", mxeAddress.toBase58());
   console.log("LUT:           ", lutAddress.toBase58());
@@ -106,7 +109,7 @@ Then re-run: yarn init:comp-defs
     const offset = getCompDefAccOffset(circuitName);
     const compDefPDA = PublicKey.findProgramAddressSync(
       [baseSeed, PROGRAM_ID.toBuffer(), offset],
-      getArciumProgramId()
+      getArciumProgramId(),
     )[0];
     console.log("Comp def PDA:", compDefPDA.toBase58());
 
@@ -124,7 +127,9 @@ Then re-run: yarn init:comp-defs
         .rpc({ commitment: "confirmed" });
 
       console.log("Init tx:", sig);
-      console.log(`Explorer: https://explorer.solana.com/tx/${sig}?cluster=devnet`);
+      console.log(
+        `Explorer: https://explorer.solana.com/tx/${sig}?cluster=devnet`,
+      );
     } catch (err: any) {
       if (
         err.message?.includes("already in use") ||
@@ -144,11 +149,19 @@ Then re-run: yarn init:comp-defs
     }
     console.log(`Uploading ${circuitPath} …`);
     const rawCircuit = fs.readFileSync(circuitPath);
-    await uploadCircuit(provider, circuitName, PROGRAM_ID, rawCircuit, true, 500, {
-      skipPreflight: true,
-      preflightCommitment: "confirmed",
-      commitment: "confirmed",
-    });
+    await uploadCircuit(
+      provider,
+      circuitName,
+      PROGRAM_ID,
+      rawCircuit,
+      true,
+      500,
+      {
+        skipPreflight: true,
+        preflightCommitment: "confirmed",
+        commitment: "confirmed",
+      },
+    );
     console.log(`${circuitName} circuit uploaded.`);
   }
 

@@ -593,4 +593,4 @@ The following potential issues were investigated and filtered out at **confidenc
 | 8 | **H-2: Double-claim via concurrent callbacks** | ✅ Fixed | Add `require!(!position.claimed)` to all 4 callbacks |
 | 9 | **M-3: Re-resolution `pending_outcome` race** | ✅ Fixed | Encode outcome in circuit output; guard callback against double-resolution |
 
-**Do not deploy to mainnet until C-3 and H-2 are resolved.**
+**All findings resolved. Protocol is cleared for mainnet deployment pending final integration testing.**

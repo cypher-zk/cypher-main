@@ -7,7 +7,7 @@ use arcium_client::idl::arcium::types::CallbackAccount as ArciumCallbackAccount;
 pub mod states;
 use states::*;
 
-declare_id!("F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc");
+declare_id!("cyphPe923pnPGVXJL3a3P7t2W9mJsagBcg1oeauoh2B");
 
 // comp def offsets for yes/no market operations
 

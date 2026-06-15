@@ -6,7 +6,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-cypher_main = "F6pTnahcgW4gJX3iKxihmZGNUJN1jH4s77ijpK34FpFc"
+cypher_main = "cyphPe923pnPGVXJL3a3P7t2W9mJsagBcg1oeauoh2B"
+
+[programs.devnet]
+cypher_main = "cyphPe923pnPGVXJL3a3P7t2W9mJsagBcg1oeauoh2B"
 
 [provider]
 cluster = "https://api.devnet.solana.com"
