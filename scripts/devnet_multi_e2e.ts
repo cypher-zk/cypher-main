@@ -18,7 +18,6 @@ import {
   Keypair,
   PublicKey,
   SystemProgram,
-  LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 import {
   TOKEN_PROGRAM_ID,
@@ -168,21 +167,6 @@ function encrypt(netAmt: number, side: number, mxeKey: Uint8Array) {
            nonce: new BN(deserializeLE(nonce).toString()) };
 }
 
-// ── Airdrop with retries ───────────────────────────────────────────────────────
-
-async function airdrop(connection: Connection, to: PublicKey, lamports: number) {
-  for (let attempt = 1; attempt <= 5; attempt++) {
-    try {
-      const sig = await connection.requestAirdrop(to, lamports);
-      await connection.confirmTransaction(sig, "confirmed");
-      return;
-    } catch {
-      if (attempt === 5) throw new Error(`Airdrop failed for ${to.toBase58()}`);
-      await sleep(2_000 * attempt);
-    }
-  }
-}
-
 // ── Create & fund 10 players ───────────────────────────────────────────────────
 
 async function createPlayers(
@@ -198,7 +182,7 @@ async function createPlayers(
 
   for (const cfg of PLAYERS) {
     const keypair = Keypair.generate();
-    await airdrop(connection, keypair.publicKey, 2 * LAMPORTS_PER_SOL);
+    // Admin (Anchor provider) pays all tx fees — players need no SOL airdrop.
     const tokenAccount = await createAccount(
       connection, admin, mint, keypair.publicKey, Keypair.generate(),
     );
@@ -318,6 +302,21 @@ async function main() {
   // ── STEP 2: Create market ───────────────────────────────────────────────────
   console.log("\n▶  STEP 2  Create multi-outcome market");
   console.log("   ─────────────────────────────────");
+
+  // Alice is the creator and on-chain payer for market/vault/lpPos account rent.
+  // She was only funded with USDC, so we transfer 0.02 SOL from admin first.
+  {
+    const { Transaction } = await import("@solana/web3.js");
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: admin.publicKey,
+        toPubkey:   creator.keypair.publicKey,
+        lamports:   20_000_000, // 0.02 SOL
+      }),
+    );
+    await provider.sendAndConfirm(tx, [admin]);
+    console.log(`   ✓ funded Alice with 0.02 SOL for account rent`);
+  }
 
   const gs2: any  = await program.account.globalState.fetch(gsPda);
   const mktId     = gs2.marketCounter as BN;
@@ -444,9 +443,10 @@ async function main() {
         clockAccount:       getClockAccAddress(),
         systemProgram:      SystemProgram.programId,
         arciumProgram:      ARCIUM_PROG,
-        resolver:           admin.publicKey,
+        resolver:           creator.keypair.publicKey,
         market:             mkt,
       })
+      .signers([creator.keypair])
       .rpc({ commitment: "confirmed" });
     console.log(`   ✓ resolve queued: ${rSig}`);
     const cbSig = await awaitComputationFinalization(provider, rOffset, PROGRAM_ID, "confirmed", CB_TIMEOUT_MS);
