@@ -38,4 +38,5 @@ indexmap = { version = "=2.13.1" }
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(target_os, values("solana"))',
+    'cfg(cypher_mainnet)',
 ] }
