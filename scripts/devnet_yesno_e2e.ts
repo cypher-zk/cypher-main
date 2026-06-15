@@ -60,6 +60,12 @@ const RPC_URL =
 const KEYPAIR_PATH =
   process.env.KEYPAIR_PATH ?? `${os.homedir()}/.config/solana/id.json`;
 
+// ── Token mint ─────────────────────────────────────────────────────────────────
+// Devnet: a fresh regular SPL Token mint is created each run (program requires
+//         standard Token program, not Token2022).
+// Mainnet: set ACCEPTED_MINT to USDC and use `transfer` from admin instead of `mintTo`.
+//   mainnet USDC →  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const SIGN_SEED = Buffer.from("ArciumSignerAccount");
@@ -193,7 +199,7 @@ async function airdrop(
 async function createPlayers(
   connection: Connection,
   admin: Keypair,
-  usdcMint: PublicKey,
+  mint: PublicKey,
 ): Promise<Player[]> {
   console.log(
     "\n  ┌─────────────────────────────────────────────────────────────┐",
@@ -217,13 +223,9 @@ async function createPlayers(
     const keypair = Keypair.generate();
     await airdrop(connection, keypair.publicKey, 2 * LAMPORTS_PER_SOL);
     const tokenAccount = await createAccount(
-      connection,
-      admin,
-      usdcMint,
-      keypair.publicKey,
-      Keypair.generate(),
+      connection, admin, mint, keypair.publicKey, Keypair.generate(),
     );
-    await mintTo(connection, admin, usdcMint, tokenAccount, admin, cfg.usdc);
+    await mintTo(connection, admin, mint, tokenAccount, admin, cfg.usdc);
 
     const role =
       cfg.role === "creator"
@@ -296,51 +298,46 @@ async function main() {
     "╚═══════════════════════════════════════════════════════════════╝",
   );
 
-  // ── STEP 1: GlobalState ─────────────────────────────────────────────────────
+  // ── STEP 1: GlobalState + comp defs ─────────────────────────────────────────
   console.log("\n▶  STEP 1  GlobalState + comp defs");
   console.log("   ─────────────────────────────────");
 
+  // Create a fresh regular SPL Token mint for this test run.
+  // (The program requires standard Token program; CSDC/USDC on mainnet are also SPL Token.)
+  const mint = await createMint(
+    connection, admin, admin.publicKey, null, DECIMALS,
+  );
+  console.log(`   Fresh mint: ${mint.toBase58()}`);
+
   const gsPda = globalStatePda();
-  let usdcMint: PublicKey;
   let treasury: PublicKey;
 
   const existing = await connection.getAccountInfo(gsPda);
-  if (existing) {
-    const gs: any = await program.account.globalState.fetch(gsPda);
-    usdcMint = gs.acceptedMint;
-    treasury = gs.protocolTreasury;
-    console.log(
-      `   ℹ GlobalState exists.  Mint: ${usdcMint.toBase58().slice(0, 12)}...`,
-    );
-  } else {
-    usdcMint = await createMint(
-      connection,
-      admin,
-      admin.publicKey,
-      null,
-      DECIMALS,
-    );
+  if (!existing) {
     const tKp = Keypair.generate();
-    treasury = await createAccount(
-      connection,
-      admin,
-      usdcMint,
-      admin.publicKey,
-      tKp,
-    );
-    const sig = await program.methods
-      .initialize(PROTOCOL_FEE, LP_FEE)
+    treasury = await createAccount(connection, admin, mint, admin.publicKey, tKp);
+    const sig = await program.methods.initialize(PROTOCOL_FEE, LP_FEE)
       .accountsPartial({
-        admin: admin.publicKey,
-        globalState: gsPda,
-        protocolTreasury: treasury,
-        acceptedMint: usdcMint,
+        admin: admin.publicKey, globalState: gsPda,
+        protocolTreasury: treasury, acceptedMint: mint,
         systemProgram: SystemProgram.programId,
       })
       .rpc({ commitment: "confirmed" });
     console.log(`   ✓ initialize: ${sig}`);
-    console.log(`   Mint: ${usdcMint.toBase58()}`);
+  } else {
+    // Always update GlobalState mint to this run's fresh mint
+    const tKp = Keypair.generate();
+    treasury = await createAccount(connection, admin, mint, admin.publicKey, tKp);
+    const sig = await program.methods.updateAcceptedMint()
+      .accountsPartial({
+        admin: admin.publicKey, globalState: gsPda,
+        newMint: mint, newTreasury: treasury,
+      })
+      .rpc({ commitment: "confirmed" });
+    console.log(`   ✓ update_accepted_mint: ${sig}`);
   }
+  console.log(`   Mint:     ${mint.toBase58()}`);
+  console.log(`   Treasury: ${treasury!.toBase58().slice(0,12)}...`);
 
   // Register comp defs (idempotent)
   const mxeAddr = getMXEAccAddress(PROGRAM_ID);
@@ -374,7 +371,7 @@ async function main() {
   }
 
   // ── Fund 10 players ─────────────────────────────────────────────────────────
-  const players = await createPlayers(connection, admin, usdcMint);
+  const players = await createPlayers(connection, admin, mint);
   const creator = players[0];
   const bettors = players.slice(1); // players 1-9
 
@@ -398,7 +395,7 @@ async function main() {
       lpPosition: lpPos,
       marketVault: vault,
       creatorTokenAccount: creator.tokenAccount,
-      acceptedMint: usdcMint,
+      acceptedMint: mint,
       tokenProgram: TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
     })

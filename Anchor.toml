@@ -12,7 +12,7 @@ cypher_main = "cyphPe923pnPGVXJL3a3P7t2W9mJsagBcg1oeauoh2B"
 cypher_main = "cyphPe923pnPGVXJL3a3P7t2W9mJsagBcg1oeauoh2B"
 
 [provider]
-cluster = "https://api.devnet.solana.com"
+cluster = "https://devnet.helius-rpc.com/?api-key=8c79234f-3452-457b-96e3-171b70c0cfd4"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

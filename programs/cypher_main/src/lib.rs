@@ -46,6 +46,12 @@ pub mod cypher {
         Ok(())
     }
 
+    pub fn update_accepted_mint(ctx: Context<UpdateAcceptedMint>) -> Result<()> {
+        ctx.accounts.global_state.accepted_mint = ctx.accounts.new_mint.key();
+        ctx.accounts.global_state.protocol_treasury = ctx.accounts.new_treasury.key();
+        Ok(())
+    }
+
     // init def accounts for yes/no market operations
 
     pub fn init_place_bet_yesno_comp_def(ctx: Context<InitPlaceBetYesnoCompDef>) -> Result<()> {
@@ -1549,6 +1555,22 @@ pub struct Initialize<'info> {
     pub protocol_treasury: UncheckedAccount<'info>,
     pub accepted_mint: InterfaceAccount<'info, Mint>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateAcceptedMint<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [b"global_state"],
+        bump = global_state.bump,
+        has_one = admin @ CypherError::UnauthorizedAdmin,
+    )]
+    pub global_state: Box<Account<'info, GlobalState>>,
+    pub new_mint: InterfaceAccount<'info, Mint>,
+    /// CHECK: treasury wallet — validated only as a token account for the new mint off-chain
+    pub new_treasury: UncheckedAccount<'info>,
 }
 
 #[derive(Accounts)]
